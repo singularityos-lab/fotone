@@ -52,6 +52,7 @@ fn platformModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTar
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
     mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
     mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no });
+    mod.linkSystemLibrary("ocdm", .{ .use_pkg_config = .no, .needed = true });
     for ([_][]const u8{ "glib-2.0", "gobject-2.0", "gio-2.0", "epoxy", "gbm", "libdrm" }) |s| mod.linkSystemLibrary(s, .{});
     return mod;
 }
@@ -114,7 +115,11 @@ pub fn build(b: *std.Build) void {
     const stage = b.addSystemCommand(&.{ "cmake", "--install", out });
     stage.setEnvironmentVariable("DESTDIR", b.pathJoin(&.{ out, "stage" }));
     stage.step.dependOn(&compile.step);
-    b.step("engine", "fetch, patch and build WPE WebKit").dependOn(&stage.step);
+    const stage_ocdm = b.addSystemCommand(&.{ "cp", "-P" });
+    stage_ocdm.addFileArg(ocdm.getEmittedBin());
+    stage_ocdm.addArg(b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }));
+    stage_ocdm.step.dependOn(&stage.step);
+    b.step("engine", "fetch, patch and build WPE WebKit").dependOn(&stage_ocdm.step);
 
     const platform = b.addLibrary(.{
         .name = "fotone",

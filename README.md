@@ -24,7 +24,7 @@ engine needs live as patches in `patches/`.
 - `compat/`: `fotone-compat`, which reports the symbols, types, properties, signals and
   basic behaviour of any `libwebkitgtk-6.0` so the proxy can be diffed against WebKitGTK.
 
-Per-site user agents and engine settings live in `site-exceptions.json`, read from
+Per-site user agents, autoplay policies and engine settings live in `site-exceptions.json`, read from
 `$XDG_CONFIG_HOME/fotone` first and then from the system data directories.
 
 `zig build engine` downloads the pinned release, checks its sha256, applies the patches

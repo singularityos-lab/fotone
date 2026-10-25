@@ -122,6 +122,24 @@ pub fn apply(settings: *c.WebKitSettings, site: std.json.ObjectMap) void {
     }
 }
 
+pub fn autoplayOf(site: std.json.ObjectMap) ?c.WebKitAutoplayPolicy {
+    const v = site.get("autoplay") orelse return null;
+    if (v != .string) return null;
+    if (std.mem.eql(u8, v.string, "allow")) return c.WEBKIT_AUTOPLAY_ALLOW;
+    if (std.mem.eql(u8, v.string, "muted")) return c.WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND;
+    if (std.mem.eql(u8, v.string, "deny")) return c.WEBKIT_AUTOPLAY_DENY;
+    return null;
+}
+
+fn proceed(decision: ?*c.WebKitPolicyDecision, found: anytype) c.gboolean {
+    const f = found orelse return 0;
+    const policy = autoplayOf(f.site) orelse return 0;
+    const policies = c.webkit_website_policies_new_with_policies("autoplay", policy, @as([*c]const u8, null));
+    defer c.g_object_unref(policies);
+    c.webkit_policy_decision_use_with_policies(decision, policies);
+    return 1;
+}
+
 fn hostOf(uri: [*:0]const u8, buf: []u8) ?[]const u8 {
     const u = c.g_uri_parse(uri, c.G_URI_FLAGS_NONE, null) orelse return null;
     defer c.g_uri_unref(u);
@@ -141,7 +159,7 @@ fn decide(web: ?*c.WebKitWebView, decision: ?*c.WebKitPolicyDecision, kind: c.We
     const found = lookup(host);
     const want: usize = if (found) |f| f.id else 0;
     const have = @intFromPtr(c.g_object_get_data(@ptrCast(v), KEY));
-    if (want == have) return 0;
+    if (want == have) return proceed(decision, found);
     const current = c.webkit_web_view_get_settings(v) orelse return 0;
     if (c.g_object_get_data(@ptrCast(v), BASE_KEY) == null) c.g_object_set_data_full(@ptrCast(v), BASE_KEY, clone(current), c.g_object_unref);
     const base: *c.WebKitSettings = @ptrCast(@alignCast(c.g_object_get_data(@ptrCast(v), BASE_KEY)));
@@ -150,7 +168,7 @@ fn decide(web: ?*c.WebKitWebView, decision: ?*c.WebKitPolicyDecision, kind: c.We
     if (found) |f| apply(next, f.site);
     c.webkit_web_view_set_settings(v, next);
     c.g_object_set_data(@ptrCast(v), KEY, @ptrFromInt(want));
-    if (c.webkit_navigation_action_is_redirect(action) != 0) return 0;
+    if (c.webkit_navigation_action_is_redirect(action) != 0) return proceed(decision, found);
     _ = c.g_object_ref(request);
     defer c.g_object_unref(request);
     c.webkit_policy_decision_ignore(decision);
@@ -187,4 +205,16 @@ test "a site entry sets the agent and typed engine settings" {
     defer c.g_object_unref(copy);
     try std.testing.expectEqual(@as(c.guint, 18), c.webkit_settings_get_default_font_size(copy));
     try std.testing.expectEqualStrings(CHROME, std.mem.span(c.webkit_settings_get_user_agent(copy)));
+    try std.testing.expect(autoplayOf(site) == null);
+}
+
+test "autoplay names map to website policies" {
+    const json =
+        \\{"sites":[{"domains":["a.test"],"autoplay":"allow"},{"domains":["b.test"],"autoplay":"deny"},{"domains":["c.test"],"autoplay":"loud"}]}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.c_allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?c.WebKitAutoplayPolicy, c.WEBKIT_AUTOPLAY_ALLOW), autoplayOf(lookupIn(parsed.value, "a.test").?.site));
+    try std.testing.expectEqual(@as(?c.WebKitAutoplayPolicy, c.WEBKIT_AUTOPLAY_DENY), autoplayOf(lookupIn(parsed.value, "b.test").?.site));
+    try std.testing.expect(autoplayOf(lookupIn(parsed.value, "c.test").?.site) == null);
 }

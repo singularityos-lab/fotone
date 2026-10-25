@@ -602,6 +602,10 @@ fn permissionChosen(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer)
 pub fn permissionRequest(web: ?*c.WebKitWebView, r: ?*c.WebKitPermissionRequest, data: c.gpointer) callconv(.c) c.gboolean {
     const w: *c.GtkWidget = @ptrCast(@alignCast(data));
     const req = r orelse return 0;
+    if (isA(req, c.webkit_media_key_system_permission_request_get_type())) {
+        c.webkit_permission_request_allow(req);
+        return 1;
+    }
     const text = permissionText(req) orelse return 0;
     var stored: [2]perms.Entry = undefined;
     const entries = storedEntries(req, &stored);
