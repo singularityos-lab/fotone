@@ -189,6 +189,12 @@ pub fn build(b: *std.Build) void {
     const sandbox = b.addExecutable(.{ .name = "fotone-sandbox", .root_module = sandbox_mod });
     b.getInstallStep().dependOn(&b.addInstallArtifact(sandbox, .{ .dest_dir = .{ .override = .{ .custom = "libexec/wpe-webkit-2.0" } } }).step);
 
+    const bump_mod = b.createModule(.{ .root_source_file = b.path("bump/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    bump_mod.addIncludePath(b.path("bump"));
+    bump_mod.linkSystemLibrary("libsoup-3.0", .{});
+    const bump = b.addRunArtifact(b.addExecutable(.{ .name = "fotone-bump", .root_module = bump_mod, .use_llvm = true }));
+    bump.setCwd(b.path("."));
+    b.step("bump", "move the upstream pin to the newest stable WPE WebKit release").dependOn(&bump.step);
 
     const t = b.addTest(.{ .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out), .use_llvm = true });
     const wt_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out);
@@ -205,4 +211,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hooks.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bump_mod, .use_llvm = true })).step);
 }

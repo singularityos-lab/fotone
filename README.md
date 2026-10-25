@@ -21,6 +21,8 @@ engine needs live as patches in `patches/`.
   the first time a site asks for it and the user agrees.
 - `proxy/`: `libwebkitgtk-6.0.so.4` and `libjavascriptcoregtk-6.0.so.1` with the WebKitGTK 6.0
   binary interface, so existing GTK 4 applications run on the Fotone engine unchanged.
+- `bump/`: `zig build bump` moves `upstream/` to the newest stable WPE WebKit release
+  (`FOTONE_BUMP_TO` picks a given one); `zig build engine` then shows which patches still apply.
 - `compat/`: `fotone-compat`, which reports the symbols, types, properties, signals and
   basic behaviour of any `libwebkitgtk-6.0` so the proxy can be diffed against WebKitGTK.
 
