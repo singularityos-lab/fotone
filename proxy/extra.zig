@@ -260,7 +260,10 @@ export fn webkit_web_inspector_get_attached_height(_: *Object) c.guint {
     return 0;
 }
 
-export fn webkit_web_inspector_show(_: *Object) void {}
+export fn webkit_web_inspector_show(i: *Object) void {
+    const sit = proxy_view.sitOf(i.view) orelse return;
+    _ = c.sit_web_view_show_devtools(sit);
+}
 
 export fn webkit_web_inspector_close(_: *Object) void {}
 

@@ -3,6 +3,7 @@ const c = @import("c.zig").c;
 const g = @import("gobject.zig");
 
 pub const FrameFunc = ?*const fn (?*c.WPEView, ?*c.WPEBuffer, c.gpointer) callconv(.c) void;
+pub const AccessibleFunc = ?*const fn (?*c.WPEView, [*c]const u8, c.gpointer) callconv(.c) void;
 
 pub const View = extern struct {
     parent: c.WPEView,
@@ -11,7 +12,57 @@ pub const View = extern struct {
     destroy: c.GDestroyNotify,
     pending: ?*c.WPEBuffer,
     shown: ?*c.WPEBuffer,
+    accessible: ?*Accessible,
+    plug: [*c]u8,
+    a11y_func: AccessibleFunc,
+    a11y_data: c.gpointer,
+    a11y_destroy: c.GDestroyNotify,
 };
+
+const Accessible = extern struct {
+    parent: c.GObject,
+    view: ?*View,
+};
+
+const AccessibleClass = extern struct {
+    parent: c.GObjectClass,
+};
+
+var accessible_once: g.Once = .{};
+
+fn accessibleType() c.GType {
+    return accessible_once.get(makeAccessible);
+}
+
+fn makeAccessible() c.GType {
+    const t = g.register(c.g_object_get_type(), "FotoneViewAccessible", AccessibleClass, Accessible, null, null);
+    const info: c.GInterfaceInfo = .{ .interface_init = accessibleIfaceInit, .interface_finalize = null, .interface_data = null };
+    c.g_type_add_interface_static(t, c.wpe_view_accessible_get_type(), &info);
+    return t;
+}
+
+fn bind(a: ?*c.WPEViewAccessible, plug: [*c]const u8) callconv(.c) void {
+    const acc: *Accessible = @ptrCast(@alignCast(a));
+    const v = acc.view orelse return;
+    c.g_free(v.plug);
+    v.plug = c.g_strdup(plug);
+    if (v.a11y_func) |f| f(&v.parent, v.plug, v.a11y_data);
+}
+
+fn accessibleIfaceInit(iface: c.gpointer, _: c.gpointer) callconv(.c) void {
+    const i: *c.WPEViewAccessibleInterface = @ptrCast(@alignCast(iface));
+    i.bind = bind;
+}
+
+fn getAccessible(view: [*c]c.WPEView) callconv(.c) ?*c.WPEViewAccessible {
+    const v = of(view);
+    if (v.accessible == null) {
+        const a: *Accessible = @ptrCast(@alignCast(c.g_object_new(accessibleType(), @as([*c]const u8, null))));
+        a.view = v;
+        v.accessible = a;
+    }
+    return @ptrCast(v.accessible);
+}
 
 const Class = extern struct {
     parent: c.WPEViewClass,
@@ -56,9 +107,24 @@ fn clearFunc(v: *View) void {
     v.destroy = null;
 }
 
+fn clearAccessibleFunc(v: *View) void {
+    if (v.a11y_destroy) |d| d(v.a11y_data);
+    v.a11y_func = null;
+    v.a11y_data = null;
+    v.a11y_destroy = null;
+}
+
 fn dispose(o: [*c]c.GObject) callconv(.c) void {
     const v = of(o);
     clearFunc(v);
+    clearAccessibleFunc(v);
+    if (v.accessible) |a| {
+        a.view = null;
+        c.g_object_unref(a);
+        v.accessible = null;
+    }
+    c.g_free(v.plug);
+    v.plug = null;
     g.unrefPtr(&v.pending);
     g.unrefPtr(&v.shown);
     parent_class.?.dispose.?(o);
@@ -90,6 +156,7 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     oc.dispose = dispose;
     const vc: *c.WPEViewClass = @ptrCast(@alignCast(klass));
     vc.render_buffer = renderBuffer;
+    vc.get_accessible = getAccessible;
 }
 
 pub export fn fotone_view_get_type() c.GType {
@@ -108,10 +175,35 @@ pub export fn fotone_view_frame_presented(view: [*c]c.WPEView) void {
     present(of(view));
 }
 
+pub export fn fotone_view_set_accessible_func(view: [*c]c.WPEView, func: AccessibleFunc, data: c.gpointer, destroy: c.GDestroyNotify) void {
+    const v = of(view);
+    clearAccessibleFunc(v);
+    v.a11y_func = func;
+    v.a11y_data = data;
+    v.a11y_destroy = destroy;
+    if (v.plug != null) if (func) |f| f(view, v.plug, data);
+}
+
+pub export fn fotone_view_get_accessible_plug(view: [*c]c.WPEView) [*c]const u8 {
+    return of(view).plug;
+}
+
 test "a view without a host frame func presents at once" {
     const d = @import("display.zig").fotone_display_new(null);
     defer c.g_object_unref(d);
     const v: *View = @ptrCast(@alignCast(c.g_object_new(getType(), "display", d, @as(?*anyopaque, null))));
     defer c.g_object_unref(v);
     try std.testing.expect(v.pending == null and v.shown == null);
+}
+
+test "the engine binds its accessibility tree through the view" {
+    const d = @import("display.zig").fotone_display_new(null);
+    defer c.g_object_unref(d);
+    const v: *View = @ptrCast(@alignCast(c.g_object_new(getType(), "display", d, @as(?*anyopaque, null))));
+    defer c.g_object_unref(v);
+    const a = c.wpe_view_get_accessible(&v.parent);
+    try std.testing.expect(a != null);
+    try std.testing.expect(a == c.wpe_view_get_accessible(&v.parent));
+    c.wpe_view_accessible_bind(a, ":1.42:/org/a11y/atspi/accessible/1");
+    try std.testing.expectEqualStrings(":1.42:/org/a11y/atspi/accessible/1", std.mem.span(fotone_view_get_accessible_plug(&v.parent)));
 }

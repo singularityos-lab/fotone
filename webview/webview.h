@@ -11,6 +11,7 @@
 #define G_GNUC_END_IGNORE_DEPRECATIONS
 #define GTK_CSS_COMPILATION 1
 #include <gtk/gtk.h>
+#include <gtk/a11y/gtkatspi.h>
 #include <wpe/webkit.h>
 #include <libsecret/secret.h>
 #include <fotone.h>

@@ -21,6 +21,11 @@ const engine_flags = [_][]const u8{
     "-DENABLE_JOURNALD_LOG=OFF",
     "-DUSE_LIBBACKTRACE=OFF",
     "-DUSE_SYSPROF_CAPTURE=OFF",
+    "-DENABLE_WEB_RTC=ON",
+    "-DUSE_GSTREAMER_WEBRTC=ON",
+    "-DUSE_LIBRICE=OFF",
+    "-DENABLE_ENCRYPTED_MEDIA=ON",
+    "-DENABLE_THUNDER=OFF",
     "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-Bsymbolic-functions",
 };
 

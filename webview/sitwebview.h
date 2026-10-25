@@ -21,6 +21,7 @@ void           sit_web_view_set_transparent (SitWebView *self,
                                              gboolean    transparent);
 gboolean       sit_web_view_get_transparent (SitWebView *self);
 GdkTexture    *sit_web_view_get_frame    (SitWebView *self);
+gboolean       sit_web_view_show_devtools (SitWebView *self);
 void           sit_web_view_set_passwords (SitWebView *self,
                                            gboolean    enabled);
 gboolean       sit_web_view_get_passwords (SitWebView *self);

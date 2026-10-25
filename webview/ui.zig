@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const nearby = @import("nearby.zig");
 const capabilities = @import("capabilities.zig");
+const contacts = @import("contacts.zig");
+const perms = @import("perms.zig");
 
 fn tr(s: [*:0]const u8) [*c]const u8 {
     return c.g_dgettext("gtk40", s);
@@ -399,7 +401,38 @@ fn addTranslate(group: *c.GSimpleActionGroup, model: *c.GMenu, web: ?*c.WebKitWe
     c.g_menu_append_section(model, null, @ptrCast(@alignCast(section)));
 }
 
-pub fn contextMenu(w: *c.GtkWidget, menu: *c.WebKitContextMenu, x: f64, y: f64, uri: [*c]const u8, selection: ?*c.WebKitWebView) bool {
+var cards: [contacts.MAX]contacts.Card = undefined;
+
+fn fillContact(_: ?*c.GSimpleAction, param: ?*c.GVariant, data: c.gpointer) callconv(.c) void {
+    contacts.fill(@ptrCast(@alignCast(data)), param orelse return);
+}
+
+fn addContacts(group: *c.GSimpleActionGroup, model: *c.GMenu, web: ?*c.WebKitWebView) void {
+    const v = web orelse return;
+    const n = contacts.load(&cards);
+    if (n == 0) return;
+    const action = c.g_simple_action_new("contact-fill", c.g_variant_type_checked_("a{ss}"));
+    defer c.g_object_unref(action);
+    _ = c.g_signal_connect_data(action, "activate", @ptrCast(&fillContact), v, null, 0);
+    c.g_action_map_add_action(@ptrCast(group), @ptrCast(action));
+    const sub = c.g_menu_new();
+    defer c.g_object_unref(sub);
+    for (cards[0..n]) |*card| {
+        const name = card.get(.name);
+        const label = c.g_strndup(name.ptr, name.len);
+        defer c.g_free(label);
+        const item = c.g_menu_item_new(label, null);
+        defer c.g_object_unref(item);
+        c.g_menu_item_set_action_and_target_value(item, "ctx.contact-fill", card.variant());
+        c.g_menu_append_item(sub, item);
+    }
+    const section = c.g_menu_new();
+    defer c.g_object_unref(section);
+    c.g_menu_append_submenu(section, c.g_dgettext("fotone", "Fill from Contacts"), @ptrCast(@alignCast(sub)));
+    c.g_menu_append_section(model, null, @ptrCast(@alignCast(section)));
+}
+
+pub fn contextMenu(w: *c.GtkWidget, menu: *c.WebKitContextMenu, x: f64, y: f64, uri: [*c]const u8, selection: ?*c.WebKitWebView, editable: ?*c.WebKitWebView) bool {
     if (c.webkit_context_menu_get_n_items(menu) == 0) return false;
     const group = c.g_simple_action_group_new().?;
     defer c.g_object_unref(group);
@@ -407,7 +440,8 @@ pub fn contextMenu(w: *c.GtkWidget, menu: *c.WebKitContextMenu, x: f64, y: f64, 
     defer c.g_object_unref(model);
     addItems(group, model, c.webkit_context_menu_get_items(menu));
     addTranslate(group, model, selection);
-    addNearby(group, model, uri);
+    addContacts(group, model, editable);
+    addNearby(group, model, if (editable == null) uri else null);
     c.gtk_widget_insert_action_group(w, "ctx", @ptrCast(group));
     const popover = c.gtk_popover_menu_new_from_model(@ptrCast(@alignCast(model)));
     const area: c.GdkRectangle = .{ .x = @intFromFloat(x), .y = @intFromFloat(y), .width = 1, .height = 1 };
@@ -497,9 +531,57 @@ fn permissionKey(web: ?*c.WebKitWebView, r: *c.WebKitPermissionRequest) [*c]u8 {
     return c.g_strdup_printf("%s %s", if (host != null) host else @as([*c]const u8, ""), c.g_type_name(c.G_TYPE_FROM_INSTANCE(r)));
 }
 
+fn storedEntries(r: *c.WebKitPermissionRequest, out: *[2]perms.Entry) []const perms.Entry {
+    if (isA(r, c.webkit_user_media_permission_request_get_type())) {
+        const m: *c.WebKitUserMediaPermissionRequest = @ptrCast(@alignCast(r));
+        if (c.webkit_user_media_permission_is_for_display_device(m) != 0) return out[0..0];
+        var n: usize = 0;
+        if (c.webkit_user_media_permission_is_for_video_device(m) != 0) {
+            out[n] = perms.CAMERA;
+            n += 1;
+        }
+        if (c.webkit_user_media_permission_is_for_audio_device(m) != 0) {
+            out[n] = perms.MICROPHONE;
+            n += 1;
+        }
+        return out[0..n];
+    }
+    if (isA(r, c.webkit_geolocation_permission_request_get_type())) {
+        out[0] = perms.LOCATION;
+        return out[0..1];
+    }
+    if (isA(r, c.webkit_notification_permission_request_get_type())) {
+        out[0] = perms.NOTIFICATIONS;
+        return out[0..1];
+    }
+    return out[0..0];
+}
+
+fn storedDecision(app: [*:0]const u8, entries: []const perms.Entry) ?bool {
+    if (entries.len == 0) return null;
+    var all = true;
+    for (entries) |e| {
+        const v = perms.lookup(e, app) orelse {
+            all = false;
+            continue;
+        };
+        if (!v) return false;
+    }
+    return if (all) true else null;
+}
+
 const Ask = struct {
     request: *c.WebKitPermissionRequest,
     key: [*c]u8,
+    app: [*c]u8 = null,
+    entries: [2]perms.Entry = undefined,
+    n: usize = 0,
+
+    fn remember(a: *Ask, allowed: bool) void {
+        const app = a.app orelse return;
+        for (a.entries[0..a.n]) |e| perms.store(e, app, allowed);
+        c.g_free(app);
+    }
 };
 
 fn permissionChosen(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv(.c) void {
@@ -507,6 +589,7 @@ fn permissionChosen(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer)
     defer c.g_free(a);
     defer c.g_object_unref(a.request);
     const i = c.gtk_alert_dialog_choose_finish(@ptrCast(@alignCast(src)), res, null);
+    if (i >= 0) a.remember(i == 1) else if (a.app) |app| c.g_free(app);
     if (i != 1) {
         c.g_free(a.key);
         return c.webkit_permission_request_deny(a.request);
@@ -520,6 +603,13 @@ pub fn permissionRequest(web: ?*c.WebKitWebView, r: ?*c.WebKitPermissionRequest,
     const w: *c.GtkWidget = @ptrCast(@alignCast(data));
     const req = r orelse return 0;
     const text = permissionText(req) orelse return 0;
+    var stored: [2]perms.Entry = undefined;
+    const entries = storedEntries(req, &stored);
+    const app = perms.appOf(web);
+    if (app) |id| if (storedDecision(id, entries)) |allowed| {
+        if (allowed) c.webkit_permission_request_allow(req) else c.webkit_permission_request_deny(req);
+        return 1;
+    };
     const key = permissionKey(web, req);
     if (granted != null and c.g_hash_table_contains(granted, key) != 0) {
         c.g_free(key);
@@ -540,6 +630,11 @@ pub fn permissionRequest(web: ?*c.WebKitWebView, r: ?*c.WebKitPermissionRequest,
     c.gtk_alert_dialog_set_default_button(d, 1);
     const a: *Ask = @ptrCast(@alignCast(c.g_malloc0(@sizeOf(Ask))));
     a.* = .{ .request = @ptrCast(@alignCast(c.g_object_ref(req))), .key = key };
+    if (app) |id| if (entries.len > 0) {
+        a.app = c.g_strdup(id);
+        a.n = entries.len;
+        @memcpy(a.entries[0..entries.len], entries);
+    };
     c.gtk_alert_dialog_choose(d, window(w), null, permissionChosen, a);
     return 1;
 }

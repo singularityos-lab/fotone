@@ -9,6 +9,8 @@ const print = @import("print.zig");
 const devtools = @import("devtools.zig");
 const privacy = @import("privacy.zig");
 const passwords = @import("passwords.zig");
+const perms = @import("perms.zig");
+const a11y = @import("a11y.zig");
 
 pub const WebView = extern struct {
     parent: c.GtkWidget,
@@ -52,6 +54,7 @@ fn widget(w: *WebView) *c.GtkWidget {
 pub fn getType() c.GType {
     if (c.g_once_init_enter_pointer(@ptrCast(&type_id)) != 0) {
         const t = c.g_type_register_static_simple(c.gtk_widget_get_type(), c.g_intern_static_string("SitWebView"), @sizeOf(Class), classInit, @sizeOf(WebView), instanceInit, 0);
+        a11y.implement(t);
         c.g_once_init_leave_pointer(@ptrCast(&type_id), @ptrFromInt(t));
     }
     return type_id;
@@ -433,7 +436,10 @@ fn attach(w: *WebView) void {
     if (w.web == null) w.web = @ptrCast(@alignCast(c.g_object_new(c.webkit_web_view_get_type(), "display", d, @as([*c]const u8, null))));
     w.toplevel = c.wpe_display_create_toplevel(d, 1);
     w.view = c.webkit_web_view_get_wpe_view(w.web);
-    if (w.view) |v| c.fotone_view_set_frame_func(v, frame, w, null);
+    if (w.view) |v| {
+        c.fotone_view_set_frame_func(v, frame, w, null);
+        c.fotone_view_set_accessible_func(v, a11y.plugged, w, null);
+    }
     _ = c.g_signal_connect_data(w.web, "load-changed", @ptrCast(&loadChanged), w, null, 0);
     const after = c.G_CONNECT_AFTER;
     _ = c.g_signal_connect_data(w.web, "script-dialog", @ptrCast(&ui.scriptDialog), w, null, after);
@@ -471,12 +477,33 @@ fn printRequested(_: ?*c.WebKitUserContentManager, _: ?*c.JSCValue, data: c.gpoi
     if (handled == 0) print.run(widget(w), w.web orelse return, ui.windowOf(widget(w)), null, null, true, null, null);
 }
 
+fn inspect(_: ?*c.GSimpleAction, _: ?*c.GVariant, data: c.gpointer) callconv(.c) void {
+    _ = sit_web_view_show_devtools(of(data));
+}
+
+fn replaceInspect(w: *WebView, menu: *c.WebKitContextMenu) void {
+    var l = c.webkit_context_menu_get_items(menu);
+    while (l) |node| {
+        l = node.*.next;
+        const item: *c.WebKitContextMenuItem = @ptrCast(@alignCast(node.*.data));
+        if (c.webkit_context_menu_item_get_stock_action(item) == c.WEBKIT_CONTEXT_MENU_ACTION_INSPECT_ELEMENT) c.webkit_context_menu_remove(menu, item);
+    }
+    if (!devtools.available()) return;
+    const action = c.g_simple_action_new("fotone-inspect", null);
+    defer c.g_object_unref(action);
+    _ = c.g_signal_connect_data(action, "activate", @ptrCast(&inspect), w, null, 0);
+    c.webkit_context_menu_append(menu, c.webkit_context_menu_item_new_separator());
+    c.webkit_context_menu_append(menu, c.webkit_context_menu_item_new_from_gaction(@ptrCast(action), c.g_dgettext("fotone", "Inspect"), null));
+}
+
 fn contextMenu(web: ?*c.WebKitWebView, menu: ?*c.WebKitContextMenu, hit: ?*c.WebKitHitTestResult, data: c.gpointer) callconv(.c) c.gboolean {
     const w = of(data);
+    if (menu) |m| replaceInspect(w, m);
     const link = if (hit) |h| (if (c.webkit_hit_test_result_context_is_link(h) != 0) c.webkit_hit_test_result_get_link_uri(h) else null) else null;
     const uri = if (link != null) link else c.webkit_web_view_get_uri(web);
     const selected = if (hit) |h| c.webkit_hit_test_result_context_is_selection(h) != 0 else false;
-    return @intFromBool(ui.contextMenu(widget(w), menu orelse return 0, w.last_x, w.last_y, uri, if (selected) web else null));
+    const editable = if (hit) |h| c.webkit_hit_test_result_context_is_editable(h) != 0 else false;
+    return @intFromBool(ui.contextMenu(widget(w), menu orelse return 0, w.last_x, w.last_y, uri, if (selected) web else null, if (editable) web else null));
 }
 
 fn fullscreened(win: ?*c.GtkWindow, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c) void {
@@ -546,10 +573,12 @@ fn getProperty(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, _: ?*c.GParam
 fn dispose(o: [*c]c.GObject) callconv(.c) void {
     const w = of(o);
     if (views) |list| _ = c.g_ptr_array_remove(list, w);
+    a11y.clear(widget(w));
     if (w.state) |st| c.webkit_web_view_session_state_unref(st);
     w.state = null;
     if (w.view) |v| {
         c.fotone_view_set_frame_func(v, null, null, null);
+        c.fotone_view_set_accessible_func(v, null, null, null);
         c.wpe_view_set_toplevel(v, null);
     }
     w.view = null;
@@ -639,6 +668,7 @@ pub export fn sit_web_view_new_for_web_app(id: [*:0]const u8) [*c]c.GtkWidget {
     defer if (session) |s| c.g_object_unref(s);
     const web = c.g_object_new(c.webkit_web_view_get_type(), "display", display(), "network-session", session, @as([*c]const u8, null));
     defer c.g_object_unref(web);
+    c.g_object_set_data_full(@ptrCast(@alignCast(web)), perms.APP_KEY, c.g_strdup(id), c.g_free);
     return sit_web_view_new_with_web_view(@ptrCast(@alignCast(web)));
 }
 
@@ -660,6 +690,15 @@ pub export fn sit_web_view_print(self: *WebView, parent: ?*c.GtkWindow, ps: ?*c.
     print.run(widget(self), web, parent orelse ui.windowOf(widget(self)), ps, setup, dialog != 0, done, data);
 }
 
+fn wrapWebView(web: *c.WebKitWebView) *c.GtkWidget {
+    return sit_web_view_new_with_web_view(web);
+}
+
+pub export fn sit_web_view_show_devtools(self: *WebView) c.gboolean {
+    const web = self.web orelse return 0;
+    return @intFromBool(devtools.open(web, wrapWebView, display(), ui.windowOf(widget(self))));
+}
+
 pub export fn sit_web_view_load_uri(self: *WebView, uri: [*c]const u8) void {
     if (self.web) |p| c.webkit_web_view_load_uri(p, uri);
 }
@@ -673,6 +712,9 @@ test {
     _ = settings;
     _ = accent;
     _ = memory;
+    _ = @import("contacts.zig");
+    _ = perms;
+    _ = a11y;
 }
 
 test "gestures clamp zoom and need a long swipe" {
