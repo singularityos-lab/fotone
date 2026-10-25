@@ -11,6 +11,7 @@ const privacy = @import("privacy.zig");
 const passwords = @import("passwords.zig");
 const perms = @import("perms.zig");
 const a11y = @import("a11y.zig");
+const dnr = @import("dnr.zig");
 
 pub const WebView = extern struct {
     parent: c.GtkWidget,
@@ -213,12 +214,31 @@ fn check(_: c.gpointer) callconv(.c) c.gboolean {
     const list = views orelse return 1;
     const now = c.g_get_monotonic_time();
     const p = memory.pressure();
+    var awake: usize = 0;
     var i: c.guint = 0;
     while (i < list.*.len) : (i += 1) {
         const w = of(list.*.pdata[i]);
         if (w.hidden_at > 0 and memory.shouldSleep(now - w.hidden_at, p)) sleep(w);
+        if (w.state == null) awake += 1;
+    }
+    const limit = memory.budget();
+    while (awake > limit) : (awake -= 1) {
+        const oldest = oldestHidden(list) orelse break;
+        sleep(oldest);
+        if (oldest.state == null) break;
     }
     return 1;
+}
+
+fn oldestHidden(list: *c.GPtrArray) ?*WebView {
+    var best: ?*WebView = null;
+    var i: c.guint = 0;
+    while (i < list.*.len) : (i += 1) {
+        const w = of(list.*.pdata[i]);
+        if (w.hidden_at == 0 or w.state != null or w.texture == null) continue;
+        if (best == null or w.hidden_at < best.?.hidden_at) best = w;
+    }
+    return best;
 }
 
 fn track(w: *WebView) void {
@@ -451,6 +471,7 @@ fn attach(w: *WebView) void {
     _ = c.g_signal_connect_data(w.web, "permission-request", @ptrCast(&ui.permissionRequest), w, null, after);
     _ = c.g_signal_connect_data(w.web, "submit-form", @ptrCast(&submitForm), w, null, after);
     printHook(w);
+    if (c.webkit_web_view_get_user_content_manager(w.web)) |ucm| dnr.track(ucm);
     devtools.apply(w.web.?);
     c.fotone_toplevel_set_fullscreen_func(w.toplevel, fullscreen, w, null);
     if (w.transparent != 0) applyBackground(w);
@@ -699,6 +720,19 @@ pub export fn sit_web_view_show_devtools(self: *WebView) c.gboolean {
     return @intFromBool(devtools.open(web, wrapWebView, display(), ui.windowOf(widget(self))));
 }
 
+pub export fn sit_web_view_install_rule_set(id: [*:0]const u8, rules: [*:0]const u8, done: dnr.Done, data: c.gpointer, err: [*c][*c]c.GError) c.gboolean {
+    const r = dnr.install(id, std.mem.span(rules), done, data) catch {
+        c.g_set_error_literal(err, c.g_io_error_quark(), c.G_IO_ERROR_INVALID_DATA, "the rules are not a declarativeNetRequest rule list");
+        return 0;
+    };
+    r.deinit();
+    return 1;
+}
+
+pub export fn sit_web_view_remove_rule_set(id: [*:0]const u8) void {
+    dnr.remove(id);
+}
+
 pub export fn sit_web_view_load_uri(self: *WebView, uri: [*c]const u8) void {
     if (self.web) |p| c.webkit_web_view_load_uri(p, uri);
 }
@@ -715,6 +749,7 @@ test {
     _ = @import("contacts.zig");
     _ = perms;
     _ = a11y;
+    _ = dnr;
 }
 
 test "gestures clamp zoom and need a long swipe" {

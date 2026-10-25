@@ -38,6 +38,13 @@ void           sit_web_view_print        (SitWebView       *self,
                                           void            (*done) (gpointer user_data, gboolean printed),
                                           gpointer          user_data);
 
+gboolean       sit_web_view_install_rule_set (const char *id,
+                                              const char *rules,
+                                              void      (*done) (gboolean compiled, const GError *error, gpointer user_data),
+                                              gpointer    user_data,
+                                              GError    **error);
+void           sit_web_view_remove_rule_set (const char *id);
+
 G_END_DECLS
 
 #endif
