@@ -14,6 +14,7 @@ const a11y = @import("a11y.zig");
 const dnr = @import("dnr.zig");
 const widevine = @import("widevine.zig");
 const sites = @import("sites.zig");
+const files = @import("files.zig");
 
 pub const WebView = extern struct {
     parent: c.GtkWidget,
@@ -479,6 +480,7 @@ fn attach(w: *WebView) void {
     devtools.apply(w.web.?);
     c.g_object_set_data(@ptrCast(w.web), "fotone-widget", w);
     widevine.hook(w.web.?);
+    files.hook(w.web.?);
     c.fotone_toplevel_set_fullscreen_func(w.toplevel, fullscreen, w, null);
     if (w.transparent != 0) applyBackground(w);
     track(w);
@@ -745,6 +747,7 @@ pub export fn sit_web_view_load_uri(self: *WebView, uri: [*c]const u8) void {
 }
 
 test {
+    _ = files;
     _ = webapp;
     _ = print;
     _ = devtools;
