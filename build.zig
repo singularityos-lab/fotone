@@ -21,6 +21,7 @@ const engine_flags = [_][]const u8{
     "-DENABLE_JOURNALD_LOG=OFF",
     "-DUSE_LIBBACKTRACE=OFF",
     "-DUSE_SYSPROF_CAPTURE=OFF",
+    "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-Bsymbolic-functions",
 };
 
 fn pinValue(comptime key: []const u8) []const u8 {
@@ -40,13 +41,23 @@ fn platformModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTar
         .pic = true,
         .link_libc = true,
     });
-    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ src, "Source", "WebKit", "WPEPlatform" }) });
-    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ out, "DerivedSources", "WPEPlatform" }) });
+    _ = src;
+    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "include", "wpe-webkit-2.0", "wpe-platform" }) });
     mod.addIncludePath(b.path("platform"));
-    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ out, "lib" }) });
-    mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ out, "lib" }) });
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
+    mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
     mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no });
     for ([_][]const u8{ "glib-2.0", "gobject-2.0", "gio-2.0", "epoxy", "gbm", "libdrm" }) |s| mod.linkSystemLibrary(s, .{});
+    return mod;
+}
+
+fn webviewModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, src: []const u8, out: []const u8) *std.Build.Module {
+    const mod = platformModule(b, root, target, optimize, src, out);
+    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "include", "wpe-webkit-2.0" }) });
+    mod.addIncludePath(b.path("webview"));
+    mod.linkSystemLibrary("gtk4", .{});
+    mod.linkSystemLibrary("libsoup-3.0", .{});
+    mod.linkSystemLibrary("libsecret-1", .{});
     return mod;
 }
 
@@ -68,13 +79,23 @@ pub fn build(b: *std.Build) void {
         \\for p in $(cat "$4"); do patch -d "$1" -p1 -N < "$(dirname "$4")/$p"; done
     , "fetch", src, comptime pinValue("url"), comptime pinValue("sha256"), b.pathFromRoot("patches/series") });
 
+    const hooks = b.addLibrary(.{
+        .name = "fotone-hooks",
+        .linkage = .static,
+        .root_module = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true }),
+    });
+
     const configure = b.addSystemCommand(&.{ "cmake", "-G", "Ninja", "-S", src, "-B", out });
     configure.addArgs(&engine_flags);
+    configure.addPrefixedFileArg("-DFOTONE_HOOKS=", hooks.getEmittedBin());
     configure.step.dependOn(&fetch.step);
 
     const compile = b.addSystemCommand(&.{ "ninja", "-C", out, b.fmt("-j{d}", .{jobs}) });
     compile.step.dependOn(&configure.step);
-    b.step("engine", "fetch, patch and build WPE WebKit").dependOn(&compile.step);
+    const stage = b.addSystemCommand(&.{ "cmake", "--install", out });
+    stage.setEnvironmentVariable("DESTDIR", b.pathJoin(&.{ out, "stage" }));
+    stage.step.dependOn(&compile.step);
+    b.step("engine", "fetch, patch and build WPE WebKit").dependOn(&stage.step);
 
     const platform = b.addLibrary(.{
         .name = "fotone",
@@ -86,6 +107,75 @@ pub fn build(b: *std.Build) void {
     platform.installHeader(b.path("platform/fotone.h"), "fotone/fotone.h");
     b.installArtifact(platform);
 
+    const webview_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out);
+    webview_mod.linkLibrary(platform);
+    const webview = b.addLibrary(.{
+        .name = "sitwebview",
+        .linkage = .dynamic,
+        .version = .{ .major = 0, .minor = 1, .patch = 0 },
+        .root_module = webview_mod,
+        .use_llvm = true,
+    });
+    webview.installHeader(b.path("webview/sitwebview.h"), "sit/sitwebview.h");
+    b.installArtifact(webview);
+
+    const viewer_mod = webviewModule(b, "viewer/main.zig", target, optimize, src, out);
+    viewer_mod.addIncludePath(b.path("viewer"));
+    viewer_mod.linkLibrary(webview);
+    viewer_mod.linkLibrary(platform);
+    const viewer = b.addExecutable(.{ .name = "fotone-viewer", .root_module = viewer_mod, .use_llvm = true });
+    b.installArtifact(viewer);
+    const run = b.addRunArtifact(viewer);
+    if (b.args) |a| run.addArgs(a);
+    b.step("run", "open a page in the viewer").dependOn(&run.step);
+
+    const proxy_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out);
+    proxy_mod.addIncludePath(b.path("proxy"));
+    proxy_mod.linkLibrary(webview);
+    const proxy = b.addLibrary(.{
+        .name = "webkitgtk-6.0",
+        .linkage = .dynamic,
+        .version = .{ .major = 4, .minor = 0, .patch = 0 },
+        .root_module = proxy_mod,
+        .use_llvm = true,
+    });
+    proxy.setVersionScript(b.path("proxy/symbols.map"));
+    proxy_mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no, .needed = true });
+    b.installArtifact(proxy);
+
+    const jsc_mod = b.createModule(.{ .root_source_file = b.path("proxy/jsc.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
+    jsc_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
+    jsc_mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no, .needed = true });
+    const jsc = b.addLibrary(.{
+        .name = "javascriptcoregtk-6.0",
+        .linkage = .dynamic,
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .root_module = jsc_mod,
+        .use_llvm = true,
+    });
+    b.installArtifact(jsc);
+
+    const compat_mod = b.createModule(.{ .root_source_file = b.path("compat/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    compat_mod.addIncludePath(b.path("compat"));
+    compat_mod.linkSystemLibrary("gtk4", .{});
+    b.installArtifact(b.addExecutable(.{ .name = "fotone-compat", .root_module = compat_mod, .use_llvm = true }));
+
+    const sandbox_mod = b.createModule(.{ .root_source_file = b.path("sandbox/main.zig"), .target = target, .optimize = optimize });
+    const sandbox = b.addExecutable(.{ .name = "fotone-sandbox", .root_module = sandbox_mod });
+    b.getInstallStep().dependOn(&b.addInstallArtifact(sandbox, .{ .dest_dir = .{ .override = .{ .custom = "libexec/wpe-webkit-2.0" } } }).step);
+
     const t = b.addTest(.{ .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out), .use_llvm = true });
-    b.step("test", "run tests").dependOn(&b.addRunArtifact(t).step);
+    const wt_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out);
+    wt_mod.linkLibrary(platform);
+    const wt = b.addTest(.{ .root_module = wt_mod, .use_llvm = true });
+    const pt_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out);
+    pt_mod.addIncludePath(b.path("proxy"));
+    pt_mod.linkLibrary(webview);
+    const pt = b.addTest(.{ .root_module = pt_mod, .use_llvm = true });
+    const test_step = b.step("test", "run tests");
+    test_step.dependOn(&b.addRunArtifact(pt).step);
+    test_step.dependOn(&b.addRunArtifact(t).step);
+    test_step.dependOn(&b.addRunArtifact(wt).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hooks.root_module })).step);
 }

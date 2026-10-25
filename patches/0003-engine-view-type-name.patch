@@ -1,0 +1,12 @@
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+@@ -464,7 +464,9 @@
+ #if PLATFORM(GTK)
+ WEBKIT_DEFINE_TYPE(WebKitWebView, webkit_web_view, WEBKIT_TYPE_WEB_VIEW_BASE)
+ #elif PLATFORM(WPE)
++#define g_intern_static_string(name) g_intern_static_string("Fotone" name)
+ WEBKIT_DEFINE_TYPE(WebKitWebView, webkit_web_view, G_TYPE_OBJECT)
++#undef g_intern_static_string
+ #endif
+ 
+ static inline WebPageProxy& getPage(WebKitWebView* webView)

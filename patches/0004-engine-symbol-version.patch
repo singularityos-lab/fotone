@@ -1,0 +1,11 @@
+--- a/Source/WebKit/webkitglib-symbols.map	2026-07-27 15:40:40.664040000 +0000
++++ b/Source/WebKit/webkitglib-symbols.map	2026-10-25 19:11:40.208148202 +0000
+@@ -1,6 +1,7 @@
+-{
++FOTONE_2.0 {
+ global:
+   jsc_*;
++  JS*;
+   webkit_*;
+   wpe_*;
+   extern "C++" {

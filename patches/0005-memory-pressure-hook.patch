@@ -1,0 +1,44 @@
+--- a/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.cpp	2026-10-21 17:00:30.333603000 +0000
++++ b/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.cpp	2026-10-25 19:14:53.028150555 +0000
+@@ -63,6 +63,7 @@
+ static const char* s_procMeminfo = "/proc/meminfo";
+ static const char* s_procZoneinfo = "/proc/zoneinfo";
+ static const char* s_procSelfCgroup = "/proc/self/cgroup";
++extern "C" __attribute__((weak)) int fotone_memory_pressure_level(int usedPercentage);
+ static const unsigned maxCgroupPath = 4096; // PATH_MAX = 4096 from (Linux) include/uapi/linux/limits.h
+ 
+ #define CGROUP_V2_HIERARCHY 0
+@@ -375,15 +376,20 @@
+                 continue;
+             }
+ 
+-            if (usedPercentage >= s_memoryPresurePercentageThreshold) {
+-                bool isCritical = (usedPercentage >= s_memoryPresurePercentageThresholdCritical);
++            int level = 0;
++            if (fotone_memory_pressure_level)
++                level = fotone_memory_pressure_level(usedPercentage);
++            else if (usedPercentage >= s_memoryPresurePercentageThreshold)
++                level = usedPercentage >= s_memoryPresurePercentageThresholdCritical ? 2 : 1;
++            if (level > 0) {
++                bool isCritical = level > 1;
+                 RunLoop::mainSingleton().dispatch([isCritical] {
+                     MemoryPressureHandler::singleton().triggerMemoryPressureEvent(isCritical);
+                     for (auto& processPool : WebProcessPool::allProcessPools())
+                         processPool->sendMemoryPressureEvent(isCritical);
+                 });
+             }
+-            pollInterval = pollIntervalForUsedMemoryPercentage(usedPercentage);
++            pollInterval = level > 0 ? s_minPollingInterval : pollIntervalForUsedMemoryPercentage(usedPercentage);
+         }
+     })->detach();
+ }
+--- a/Source/WebKit/PlatformWPE.cmake	2026-10-14 08:07:31.416883500 +0000
++++ b/Source/WebKit/PlatformWPE.cmake	2026-10-25 19:14:53.028150555 +0000
+@@ -824,3 +824,7 @@
+     NO_IMPLICIT_SOURCES
+ )
+ GI_DOCGEN(${WPE_WEB_PROCESS_EXTENSION_API_NAME} wpe/wpe-web-process-extension.toml.in)
++
++if (FOTONE_HOOKS)
++    list(APPEND WebKit_PRIVATE_LIBRARIES -Wl,--whole-archive ${FOTONE_HOOKS} -Wl,--no-whole-archive)
++endif ()

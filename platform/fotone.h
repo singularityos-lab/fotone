@@ -6,6 +6,7 @@
 G_BEGIN_DECLS
 
 typedef void (*FotoneFrameFunc) (WPEView *view, WPEBuffer *buffer, gpointer user_data);
+typedef gboolean (*FotoneFullscreenFunc) (WPEToplevel *toplevel, gboolean fullscreen, gpointer user_data);
 
 GType        fotone_display_get_type        (void);
 GType        fotone_view_get_type           (void);
@@ -27,6 +28,13 @@ void         fotone_toplevel_configure      (WPEToplevel    *toplevel,
                                              int             width,
                                              int             height,
                                              double          scale);
+
+void         fotone_toplevel_set_fullscreen_func (WPEToplevel      *toplevel,
+                                                  FotoneFullscreenFunc func,
+                                                  gpointer          user_data,
+                                                  GDestroyNotify    destroy);
+void         fotone_toplevel_set_fullscreened    (WPEToplevel      *toplevel,
+                                                  gboolean          fullscreen);
 
 G_END_DECLS
 

@@ -1,0 +1,221 @@
+--- a/Source/WebKit/Shared/WebPageCreationParameters.h
++++ b/Source/WebKit/Shared/WebPageCreationParameters.h
+@@ -238,7 +238,7 @@
+ #if HAVE(STATIC_FONT_REGISTRY) && !ENABLE(REMOVE_XPC_AND_MACH_SANDBOX_EXTENSIONS_IN_WEBCONTENT)
+     Vector<SandboxExtension::Handle> fontMachExtensionHandles { };
+ #endif
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     WebCore::Color accentColor { };
+ #if PLATFORM(MAC)
+     bool appUsesCustomAccentColor { false };
+--- a/Source/WebKit/Shared/WebPageCreationParameters.serialization.in
++++ b/Source/WebKit/Shared/WebPageCreationParameters.serialization.in
+@@ -153,7 +153,7 @@
+ #if HAVE(STATIC_FONT_REGISTRY) && !ENABLE(REMOVE_XPC_AND_MACH_SANDBOX_EXTENSIONS_IN_WEBCONTENT)
+     Vector<WebKit::SandboxExtensionHandle> fontMachExtensionHandles;
+ #endif
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     WebCore::Color accentColor;
+ #endif
+ #if HAVE(APP_ACCENT_COLORS) && PLATFORM(MAC)
+--- a/Source/WebKit/UIProcess/API/wpe/PageClientImpl.cpp
++++ b/Source/WebKit/UIProcess/API/wpe/PageClientImpl.cpp
+@@ -567,6 +567,22 @@
+     return WebCore::SystemSettings::singleton().darkMode().value_or(false);
+ }
+ 
++WebCore::Color PageClientImpl::accentColor()
++{
++#if ENABLE(WPE_PLATFORM)
++    if (auto* view = m_view.wpeView()) {
++        const char* value = wpe_settings_get_string(wpe_display_get_settings(wpe_view_get_display(view)), WPE_SETTING_ACCENT_COLOR, nullptr);
++        if (value && strlen(value) == 7 && value[0] == '#') {
++            char* end = nullptr;
++            unsigned long rgb = strtoul(value + 1, &end, 16);
++            if (end == value + 7)
++                return WebCore::SRGBA<uint8_t> { static_cast<uint8_t>(rgb >> 16), static_cast<uint8_t>(rgb >> 8), static_cast<uint8_t>(rgb), 255 };
++        }
++    }
++#endif
++    return { };
++}
++
+ void PageClientImpl::didChangeWebPageID() const
+ {
+     m_view.didChangePageID();
+--- a/Source/WebKit/UIProcess/API/wpe/PageClientImpl.h
++++ b/Source/WebKit/UIProcess/API/wpe/PageClientImpl.h
+@@ -191,6 +191,8 @@
+ 
+     bool effectiveAppearanceIsDark() const override;
+ 
++    WebCore::Color accentColor() override;
++
+     void didChangeWebPageID() const override;
+ 
+     void selectionDidChange() override;
+--- a/Source/WebKit/UIProcess/API/wpe/WPEWebViewPlatform.cpp
++++ b/Source/WebKit/UIProcess/API/wpe/WPEWebViewPlatform.cpp
+@@ -143,12 +143,18 @@
+         if (state.darkMode)
+             page().effectiveAppearanceDidChange();
+     }, this);
++
++    g_signal_connect(wpe_display_get_settings(display), "changed::" WPE_SETTING_ACCENT_COLOR, G_CALLBACK(+[](WPESettings*, const char*, GVariant*, gpointer userData) {
++        auto& webView = *reinterpret_cast<ViewPlatform*>(userData);
++        webView.page().accentColorDidChange();
++    }), this);
+ }
+ 
+ ViewPlatform::~ViewPlatform()
+ {
+     WebCore::SystemSettings::singleton().removeObserver(this);
+     g_signal_handlers_disconnect_by_data(m_wpeView.get(), this);
++    g_signal_handlers_disconnect_by_data(wpe_display_get_settings(wpe_view_get_display(m_wpeView.get())), this);
+     dispatchPendingNextPresentationUpdateCallbacks();
+     m_inputMethodFilter.setContext(nullptr);
+     m_backingStore = nullptr;
+--- a/Source/WebKit/UIProcess/PageClient.h
++++ b/Source/WebKit/UIProcess/PageClient.h
+@@ -507,7 +507,7 @@
+     virtual void didPerformDictionaryLookup(const WebCore::DictionaryPopupInfo&) = 0;
+ #endif
+ 
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     virtual WebCore::Color accentColor() = 0;
+ #if PLATFORM(MAC)
+     virtual bool appUsesCustomAccentColor() = 0;
+--- a/Source/WebKit/UIProcess/WebPageProxy.cpp
++++ b/Source/WebKit/UIProcess/WebPageProxy.cpp
+@@ -14366,7 +14366,7 @@
+ #endif
+     }
+ #endif
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     parameters.accentColor = pageClient ? pageClient->accentColor() : WebCore::Color { };
+ #if PLATFORM(MAC)
+     parameters.appUsesCustomAccentColor = pageClient && pageClient->appUsesCustomAccentColor();
+--- a/Source/WebKit/UIProcess/WebPageProxy.h
++++ b/Source/WebKit/UIProcess/WebPageProxy.h
+@@ -1430,7 +1430,7 @@
+     GtkWidget* viewWidget();
+ #endif
+ 
+-#if PLATFORM(GTK) && HAVE(APP_ACCENT_COLORS)
++#if (PLATFORM(GTK) && HAVE(APP_ACCENT_COLORS)) || PLATFORM(WPE)
+     void accentColorDidChange();
+ #endif
+ 
+--- a/Source/WebKit/UIProcess/wpe/WebPageProxyWPE.cpp
++++ b/Source/WebKit/UIProcess/wpe/WebPageProxyWPE.cpp
+@@ -249,4 +249,13 @@
+ #endif
+ }
+ 
++void WebPageProxy::accentColorDidChange()
++{
++    RefPtr pageClient = this->pageClient();
++    if (!hasRunningProcess() || !pageClient)
++        return;
++
++    legacyMainFrameProcess().send(Messages::WebPage::SetAccentColor(pageClient->accentColor()), webPageIDInMainFrameProcess());
++}
++
+ } // namespace WebKit
+--- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
++++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
+@@ -1212,7 +1212,7 @@
+     setSmartInsertDeleteEnabled(parameters.smartInsertDeleteEnabled);
+ #endif
+ 
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     setAccentColor(parameters.accentColor);
+ #if PLATFORM(MAC)
+     setAppUsesCustomAccentColor(parameters.appUsesCustomAccentColor);
+@@ -1606,7 +1606,7 @@
+     if (m_activityState != parameters.activityState)
+         setActivityState(parameters.activityState, ActivityStateChangeAsynchronous, [] { });
+ 
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     setAccentColor(parameters.accentColor);
+ #if PLATFORM(MAC)
+     setAppUsesCustomAccentColor(parameters.appUsesCustomAccentColor);
+--- a/Source/WebKit/WebProcess/WebPage/WebPage.h
++++ b/Source/WebKit/WebProcess/WebPage/WebPage.h
+@@ -2505,7 +2505,7 @@
+     bool shouldEnableViewportBehaviorsForResizableWindows() const;
+ #endif
+ 
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     void setAccentColor(WebCore::Color);
+ #if PLATFORM(MAC)
+     void NODELETE setAppUsesCustomAccentColor(bool);
+--- a/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
++++ b/Source/WebKit/WebProcess/WebPage/WebPage.messages.in
+@@ -698,7 +698,7 @@
+ 
+     SetUseColorAppearance(bool useDarkAppearance, bool useElevatedUserInterfaceLevel)
+ 
+-#if HAVE(APP_ACCENT_COLORS)
++#if HAVE(APP_ACCENT_COLORS) || PLATFORM(WPE)
+     SetAccentColor(WebCore::Color color)
+ #endif
+ 
+--- a/Source/WebKit/WebProcess/WebPage/wpe/WebPageWPE.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wpe/WebPageWPE.cpp
+@@ -29,6 +29,7 @@
+ #include "DrawingArea.h"
+ #include "WebPageProxyMessages.h"
+ #include <WebCore/NotImplemented.h>
++#include <WebCore/RenderThemeAdwaita.h>
+ 
+ namespace WebKit {
+ using namespace WebCore;
+@@ -52,4 +53,9 @@
+ }
+ #endif
+ 
++void WebPage::setAccentColor(WebCore::Color color)
++{
++    static_cast<RenderThemeAdwaita&>(RenderTheme::singleton()).setAccentColor(color);
++}
++
+ } // namespace WebKit
+--- a/Source/WebKit/WPEPlatform/wpe/WPESettings.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/WPESettings.cpp
+@@ -106,6 +106,7 @@
+             { WPE_SETTING_DRAG_THRESHOLD, G_VARIANT_TYPE_UINT32, g_variant_ref_sink(g_variant_new_uint32(8)) },
+             { WPE_SETTING_CREATE_VIEWS_WITH_A_TOPLEVEL, G_VARIANT_TYPE_BOOLEAN, g_variant_ref_sink(g_variant_new_boolean(true)) },
+             { WPE_SETTING_OVERLAY_SCROLLBARS, G_VARIANT_TYPE_BOOLEAN, g_variant_ref_sink(g_variant_new_boolean(true)) },
++            { WPE_SETTING_ACCENT_COLOR, G_VARIANT_TYPE_STRING, g_variant_ref_sink(g_variant_new_string("")) },
+         };
+ 
+         for (auto& setting : defaultSettings)
+--- a/Source/WebKit/WPEPlatform/wpe/WPESettings.h
++++ b/Source/WebKit/WPEPlatform/wpe/WPESettings.h
+@@ -302,6 +302,18 @@
+ #define WPE_SETTING_OVERLAY_SCROLLBARS "/wpe-platform/overlay-scrollbars"
+ 
+ /**
++ * WPE_SETTING_ACCENT_COLOR:
++ *
++ * The system accent color as #rrggbb. Pages see it as the AccentColor
++ * system color. An empty string keeps the engine default.
++ *
++ * VariantType: string
++ *
++ * Default: ""
++ */
++#define WPE_SETTING_ACCENT_COLOR "/wpe-platform/accent-color"
++
++/**
+  * WPESettingsSource:
+  * @WPE_SETTINGS_SOURCE_PLATFORM: Set by the platform
+  * @WPE_SETTINGS_SOURCE_APPLICATION: Set by the application

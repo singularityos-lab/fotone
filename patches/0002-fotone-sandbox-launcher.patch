@@ -1,0 +1,64 @@
+--- a/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
++++ b/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
+@@ -37,6 +37,7 @@
+ #include <glib.h>
+ #include <sys/socket.h>
+ #include <wtf/FileSystem.h>
++#include <wtf/NeverDestroyed.h>
+ #include <wtf/RunLoop.h>
+ #include <wtf/UniStdExtras.h>
+ #include <wtf/glib/GUniquePtr.h>
+@@ -61,6 +62,44 @@
+ namespace WebKit {
+ 
+ #if OS(LINUX)
++static const CString& fotoneSandboxPath()
++{
++    static NeverDestroyed<CString> path = [] {
++        if (const char* override = g_getenv("FOTONE_SANDBOX"))
++            return CString(override);
++        return CString(PKGLIBEXECDIR "/fotone-sandbox");
++    }();
++    return path.get();
++}
++
++static bool shouldUseFotoneSandbox(ProcessLauncher::ProcessType type)
++{
++    if (type != ProcessLauncher::ProcessType::Web)
++        return false;
++    return g_file_test(fotoneSandboxPath().data(), G_FILE_TEST_IS_EXECUTABLE);
++}
++
++static GRefPtr<GSubprocess> fotoneSandboxSpawn(GSubprocessLauncher* launcher, const ProcessLauncher::LaunchOptions& launchOptions, Vector<char*>& argv, GError** error)
++{
++    Vector<CString> prefix { fotoneSandboxPath(), CString("web") };
++    for (const auto& [path, permission] : launchOptions.extraSandboxPaths) {
++        prefix.append(permission == SandboxPermission::ReadOnly ? CString("--ro") : CString("--rw"));
++        prefix.append(path);
++    }
++    auto mediaKeys = launchOptions.extraInitializationData.get<HashTranslatorASCIILiteral>("mediaKeysDirectory"_s);
++    if (!mediaKeys.isEmpty()) {
++        prefix.append(CString("--rw"));
++        prefix.append(FileSystem::fileSystemRepresentation(mediaKeys));
++    }
++    prefix.append(CString("--"));
++
++    Vector<char*> fullArgv;
++    for (auto& arg : prefix)
++        fullArgv.append(const_cast<char*>(arg.data()));
++    fullArgv.appendVector(argv);
++    return adoptGRef(g_subprocess_launcher_spawnv(launcher, fullArgv.span().data(), error));
++}
++
+ static bool isFlatpakSpawnUsable()
+ {
+     ASSERT(isInsideFlatpak());
+@@ -257,6 +296,8 @@
+ 
+     if (sandboxEnabled && isInsideFlatpak() && isFlatpakSpawnUsable())
+         process = flatpakSpawn(launcher.get(), m_launchOptions, argv, webkitClientSocketValue, &error.outPtr());
++    else if (sandboxEnabled && shouldUseFotoneSandbox(m_launchOptions.processType))
++        process = fotoneSandboxSpawn(launcher.get(), m_launchOptions, argv, &error.outPtr());
+ #if ENABLE(BUBBLEWRAP_SANDBOX)
+     // You cannot use bubblewrap within Flatpak or some containers so lets ensure it never happens.
+     // Snap can allow it but has its own limitations that require workarounds.

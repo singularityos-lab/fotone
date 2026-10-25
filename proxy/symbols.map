@@ -1,0 +1,6 @@
+WEBKITGTK_6.0 {
+global:
+  webkit_*;
+local:
+  *;
+};

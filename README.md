@@ -12,6 +12,14 @@ engine needs live as patches in `patches/`.
 - `upstream/`: the pinned WPE WebKit release and its checksum.
 - `patches/`: changes applied on top of upstream, one file per change.
 - `platform/`: the Sinty WPEPlatform backend (`libfotone`, `fotone.h`).
+- `webview/`: `SitWebView`, the SIT widget that shows a page (`libsitwebview`, `sit/sitwebview.h`).
+- `viewer/`: `fotone-viewer`, a window with one `SitWebView`.
+- `sandbox/`: `fotone-sandbox`, which confines web processes with Landlock and seccomp before they start.
+- `hooks/`: engine-side code the patches call into, linked into WebKit as a static library.
+- `proxy/`: `libwebkitgtk-6.0.so.4` and `libjavascriptcoregtk-6.0.so.1` with the WebKitGTK 6.0
+  binary interface, so existing GTK 4 applications run on the Fotone engine unchanged.
+- `compat/`: `fotone-compat`, which reports the symbols, types, properties, signals and
+  basic behaviour of any `libwebkitgtk-6.0` so the proxy can be diffed against WebKitGTK.
 
 `zig build engine` downloads the pinned release, checks its sha256, applies the patches
 and builds WebKit with the Sinty options.

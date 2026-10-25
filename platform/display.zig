@@ -11,6 +11,7 @@ pub const Display = extern struct {
     gbm: ?*c.struct_gbm_device,
     fd: c_int,
     formats: [*c]c.GArray,
+    keymap: ?*c.WPEKeymap,
 };
 
 const Class = extern struct {
@@ -48,6 +49,7 @@ fn finalize(o: [*c]c.GObject) callconv(.c) void {
     if (d.gbm) |m| c.gbm_device_destroy(m);
     if (d.fd >= 0) _ = c.close(d.fd);
     if (d.drm) |m| c.wpe_drm_device_unref(m);
+    g.unrefPtr(&d.keymap);
     c.g_free(d.node);
     _ = c.g_array_free(d.formats, 1);
     parent_class.?.finalize.?(o);
@@ -113,6 +115,12 @@ fn getDrmDevice(display: [*c]c.WPEDisplay) callconv(.c) ?*c.WPEDRMDevice {
     return of(display).drm;
 }
 
+fn getKeymap(display: [*c]c.WPEDisplay) callconv(.c) ?*c.WPEKeymap {
+    const d = of(display);
+    if (d.keymap == null) d.keymap = c.wpe_keymap_xkb_new();
+    return d.keymap;
+}
+
 fn getPreferredFormats(display: [*c]c.WPEDisplay) callconv(.c) ?*c.WPEBufferFormats {
     const d = of(display);
     if (d.formats.*.len == 0) return null;
@@ -133,6 +141,7 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     dc.create_toplevel = createToplevel;
     dc.get_egl_display = getEglDisplay;
     dc.get_drm_device = getDrmDevice;
+    dc.get_keymap = getKeymap;
     dc.get_preferred_buffer_formats = getPreferredFormats;
 }
 
