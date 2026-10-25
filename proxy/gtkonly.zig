@@ -20,6 +20,30 @@ pub const ACTIONS = [_][]const u8{
 pub const ACTION_CUSTOM = 10000;
 const PREFIX = "WEBKIT_CONTEXT_MENU_ACTION_";
 
+fn nick(comptime name: []const u8) [:0]const u8 {
+    comptime {
+        var out: [name.len:0]u8 = undefined;
+        for (name, 0..) |ch, i| out[i] = if (ch == '_') '-' else std.ascii.toLower(ch);
+        const final = out;
+        return &final;
+    }
+}
+
+const action_values = blk: {
+    @setEvalBranchQuota(100000);
+    var v: [ACTIONS.len + 2]c.GEnumValue = undefined;
+    for (ACTIONS, 0..) |a, i| v[i] = .{ .value = i, .value_name = PREFIX ++ a, .value_nick = nick(a) };
+    v[ACTIONS.len] = .{ .value = ACTION_CUSTOM, .value_name = PREFIX ++ "CUSTOM", .value_nick = "custom" };
+    v[ACTIONS.len + 1] = .{ .value = 0, .value_name = null, .value_nick = null };
+    break :blk v;
+};
+
+var action_type: c.GType = 0;
+
+export fn webkit_context_menu_action_get_type() c.GType {
+    return enumType(&action_type, "WebKitContextMenuAction", &action_values);
+}
+
 fn actionClass() ?*c.GEnumClass {
     const t = engine.lookup("webkit_context_menu_action_get_type", fn () callconv(.c) c.GType)();
     return @ptrCast(@alignCast(c.g_type_class_ref(t)));
@@ -162,8 +186,109 @@ export fn webkit_settings_set_hardware_acceleration_policy(s: ?*c.GObject, polic
     c.g_object_set_data(s, POLICY, @ptrFromInt(@as(usize, @intCast(@max(policy, 0)))));
 }
 
-export fn webkit_window_properties_get_geometry(_: ?*anyopaque, rect: ?*c.GdkRectangle) void {
-    if (rect) |r| r.* = std.mem.zeroes(c.GdkRectangle);
+const GEOMETRY = "fotone-webkitgtk-geometry";
+
+export fn webkit_window_properties_get_geometry(p: ?*c.GObject, rect: ?*c.GdkRectangle) void {
+    const r = rect orelse return;
+    r.* = if (c.g_object_get_data(p, GEOMETRY)) |g| @as(*c.GdkRectangle, @ptrCast(@alignCast(g))).* else std.mem.zeroes(c.GdkRectangle);
+}
+
+const PROP_GESTURES = 0x4000;
+const PROP_POLICY = 0x4001;
+const PROP_GEOMETRY = 0x4002;
+const PROP_FILTER = 0x4003;
+
+const Accessors = struct {
+    get: ?*const fn ([*c]c.GObject, c.guint, [*c]c.GValue, [*c]c.GParamSpec) callconv(.c) void = null,
+    set: ?*const fn ([*c]c.GObject, c.guint, [*c]const c.GValue, [*c]c.GParamSpec) callconv(.c) void = null,
+};
+
+var settings_base: Accessors = .{};
+var window_base: Accessors = .{};
+var chooser_base: Accessors = .{};
+
+fn baseOf(id: c.guint) *Accessors {
+    return switch (id) {
+        PROP_GESTURES, PROP_POLICY => &settings_base,
+        PROP_GEOMETRY => &window_base,
+        else => &chooser_base,
+    };
+}
+
+fn extraGet(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, spec: [*c]c.GParamSpec) callconv(.c) void {
+    switch (id) {
+        PROP_GESTURES => c.g_value_set_boolean(value, webkit_settings_get_enable_back_forward_navigation_gestures(o)),
+        PROP_POLICY => c.g_value_set_enum(value, webkit_settings_get_hardware_acceleration_policy(o)),
+        PROP_GEOMETRY => {
+            var r: c.GdkRectangle = undefined;
+            webkit_window_properties_get_geometry(o, &r);
+            c.g_value_set_boxed(value, &r);
+        },
+        PROP_FILTER => c.g_value_take_object(value, webkit_file_chooser_request_get_mime_types_filter(o)),
+        else => if (baseOf(id).get) |f| f(o, id, value, spec),
+    }
+}
+
+fn extraSet(o: [*c]c.GObject, id: c.guint, value: [*c]const c.GValue, spec: [*c]c.GParamSpec) callconv(.c) void {
+    switch (id) {
+        PROP_GESTURES => webkit_settings_set_enable_back_forward_navigation_gestures(o, c.g_value_get_boolean(value)),
+        PROP_POLICY => webkit_settings_set_hardware_acceleration_policy(o, c.g_value_get_enum(value)),
+        PROP_GEOMETRY => if (c.g_value_get_boxed(value)) |b| {
+            const copy: *c.GdkRectangle = @ptrCast(@alignCast(c.g_malloc(@sizeOf(c.GdkRectangle))));
+            copy.* = @as(*const c.GdkRectangle, @ptrCast(@alignCast(b))).*;
+            c.g_object_set_data_full(o, GEOMETRY, copy, c.g_free);
+        },
+        else => if (baseOf(id).set) |f| f(o, id, value, spec),
+    }
+}
+
+fn extend(t: c.GType, base: *Accessors, specs: []const struct { c.guint, *c.GParamSpec }) void {
+    const oc: *c.GObjectClass = @ptrCast(@alignCast(c.g_type_class_ref(t)));
+    base.get = @ptrCast(oc.get_property);
+    base.set = @ptrCast(oc.set_property);
+    oc.get_property = @ptrCast(&extraGet);
+    oc.set_property = @ptrCast(&extraSet);
+    for (specs) |s| c.g_object_class_install_property(oc, s[0], s[1]);
+}
+
+var settings_once: usize = 0;
+var window_once: usize = 0;
+var chooser_once: usize = 0;
+
+const RWC = c.G_PARAM_READWRITE | c.G_PARAM_CONSTRUCT | c.G_PARAM_STATIC_STRINGS;
+
+pub export fn webkit_settings_get_type() c.GType {
+    const t = engine.lookup("webkit_settings_get_type", fn () callconv(.c) c.GType)();
+    if (c.g_once_init_enter(&settings_once) != 0) {
+        extend(t, &settings_base, &.{
+            .{ PROP_GESTURES, c.g_param_spec_boolean("enable-back-forward-navigation-gestures", null, null, 0, RWC) },
+            .{ PROP_POLICY, c.g_param_spec_enum("hardware-acceleration-policy", null, null, webkit_hardware_acceleration_policy_get_type(), 0, RWC) },
+        });
+        c.g_once_init_leave(&settings_once, 1);
+    }
+    return t;
+}
+
+pub export fn webkit_window_properties_get_type() c.GType {
+    const t = engine.lookup("webkit_window_properties_get_type", fn () callconv(.c) c.GType)();
+    if (c.g_once_init_enter(&window_once) != 0) {
+        extend(t, &window_base, &.{
+            .{ PROP_GEOMETRY, c.g_param_spec_boxed("geometry", null, null, c.gdk_rectangle_get_type(), c.G_PARAM_READWRITE | c.G_PARAM_CONSTRUCT_ONLY | c.G_PARAM_STATIC_STRINGS) },
+        });
+        c.g_once_init_leave(&window_once, 1);
+    }
+    return t;
+}
+
+pub export fn webkit_file_chooser_request_get_type() c.GType {
+    const t = engine.lookup("webkit_file_chooser_request_get_type", fn () callconv(.c) c.GType)();
+    if (c.g_once_init_enter(&chooser_once) != 0) {
+        extend(t, &chooser_base, &.{
+            .{ PROP_FILTER, c.g_param_spec_object("filter", null, null, c.gtk_file_filter_get_type(), c.G_PARAM_READABLE | c.G_PARAM_STATIC_STRINGS) },
+        });
+        c.g_once_init_leave(&chooser_once, 1);
+    }
+    return t;
 }
 
 export fn webkit_file_chooser_request_get_mime_types_filter(r: ?*anyopaque) ?*c.GtkFileFilter {

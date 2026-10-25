@@ -1,0 +1,11 @@
+--- a/Source/WebKit/UIProcess/API/wpe/WebKitEnumTypes.cpp.in
++++ b/Source/WebKit/UIProcess/API/wpe/WebKitEnumTypes.cpp.in
+@@ -49,7 +49,7 @@
+ 
+     static GType type = 0;
+     if (G_UNLIKELY(!type))
+-        type = g_@type@_register_static("@EnumName@", values);
++        type = g_@type@_register_static(g_str_equal("@EnumName@", "WebKitContextMenuAction") ? "FotoneWebKitContextMenuAction" : "@EnumName@", values);
+ 
+     return type;
+ }

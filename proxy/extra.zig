@@ -2,12 +2,16 @@ const std = @import("std");
 const c = @import("c.zig").c;
 const proxy_view = @import("view.zig");
 
+const Priv = struct {
+    view: ?*c.GObject = null,
+    rgba: c.GdkRGBA = std.mem.zeroes(c.GdkRGBA),
+    settings: ?*c.GtkPrintSettings = null,
+    setup: ?*c.GtkPageSetup = null,
+};
+
 const Object = extern struct {
     parent: c.GObject,
-    view: ?*c.GObject,
-    rgba: c.GdkRGBA,
-    settings: ?*c.GtkPrintSettings,
-    setup: ?*c.GtkPageSetup,
+    priv: *Priv,
 };
 
 const ObjectClass = extern struct {
@@ -30,17 +34,24 @@ fn of(p: anytype) *Object {
 
 fn register(t: *c.GType, name: [*:0]const u8, init: c.GClassInitFunc) c.GType {
     if (c.g_once_init_enter_pointer(@ptrCast(t)) != 0) {
-        const id = c.g_type_register_static_simple(c.G_TYPE_OBJECT, c.g_intern_static_string(name), @sizeOf(ObjectClass), init, @sizeOf(Object), null, 0);
+        const id = c.g_type_register_static_simple(c.G_TYPE_OBJECT, c.g_intern_static_string(name), @sizeOf(ObjectClass), init, @sizeOf(Object), instanceInit, 0);
         c.g_once_init_leave_pointer(@ptrCast(t), @ptrFromInt(id));
     }
     return t.*;
 }
 
+fn instanceInit(o: [*c]c.GTypeInstance, _: c.gpointer) callconv(.c) void {
+    const p: *Priv = @ptrCast(@alignCast(c.g_malloc0(@sizeOf(Priv))));
+    p.* = .{};
+    of(o).priv = p;
+}
+
 fn finalize(o: [*c]c.GObject) callconv(.c) void {
     const x = of(o);
-    if (x.view) |v| c.g_object_remove_weak_pointer(v, @ptrCast(&x.view));
-    if (x.settings) |s| c.g_object_unref(s);
-    if (x.setup) |s| c.g_object_unref(s);
+    if (x.priv.view) |v| c.g_object_remove_weak_pointer(v, @ptrCast(&x.priv.view));
+    if (x.priv.settings) |s| c.g_object_unref(s);
+    if (x.priv.setup) |s| c.g_object_unref(s);
+    c.g_free(x.priv);
     const parent: *c.GObjectClass = @ptrCast(@alignCast(c.g_type_class_peek(c.G_TYPE_OBJECT)));
     parent.finalize.?(o);
 }
@@ -57,14 +68,14 @@ fn setProperty(o: [*c]c.GObject, id: c.guint, value: [*c]const c.GValue, _: ?*c.
     const x = of(o);
     switch (id) {
         PROP_WEB_VIEW => {
-            if (x.view) |v| c.g_object_remove_weak_pointer(v, @ptrCast(&x.view));
-            x.view = @ptrCast(@alignCast(c.g_value_get_object(value)));
-            if (x.view) |v| c.g_object_add_weak_pointer(v, @ptrCast(&x.view));
+            if (x.priv.view) |v| c.g_object_remove_weak_pointer(v, @ptrCast(&x.priv.view));
+            x.priv.view = @ptrCast(@alignCast(c.g_value_get_object(value)));
+            if (x.priv.view) |v| c.g_object_add_weak_pointer(v, @ptrCast(&x.priv.view));
         },
         PROP_PRINT_SETTINGS => webkit_print_operation_set_print_settings(x, @ptrCast(@alignCast(c.g_value_get_object(value)))),
         PROP_PAGE_SETUP => webkit_print_operation_set_page_setup(x, @ptrCast(@alignCast(c.g_value_get_object(value)))),
         PROP_RGBA => if (c.g_value_get_boxed(value)) |b| {
-            x.rgba = @as(*const c.GdkRGBA, @ptrCast(@alignCast(b))).*;
+            x.priv.rgba = @as(*const c.GdkRGBA, @ptrCast(@alignCast(b))).*;
         },
         else => {},
     }
@@ -73,10 +84,10 @@ fn setProperty(o: [*c]c.GObject, id: c.guint, value: [*c]const c.GValue, _: ?*c.
 fn getProperty(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, _: ?*c.GParamSpec) callconv(.c) void {
     const x = of(o);
     switch (id) {
-        PROP_WEB_VIEW => c.g_value_set_object(value, x.view),
-        PROP_PRINT_SETTINGS => c.g_value_set_object(value, x.settings),
-        PROP_PAGE_SETUP => c.g_value_set_object(value, x.setup),
-        PROP_RGBA => c.g_value_set_boxed(value, &x.rgba),
+        PROP_WEB_VIEW => c.g_value_set_object(value, x.priv.view),
+        PROP_PRINT_SETTINGS => c.g_value_set_object(value, x.priv.settings),
+        PROP_PAGE_SETUP => c.g_value_set_object(value, x.priv.setup),
+        PROP_RGBA => c.g_value_set_boxed(value, &x.priv.rgba),
         PROP_ATTACHED_HEIGHT => c.g_value_set_uint(value, 0),
         PROP_CAN_ATTACH => c.g_value_set_boolean(value, 0),
         PROP_INSPECTED_URI => c.g_value_set_string(value, webkit_web_inspector_get_inspected_uri(x)),
@@ -135,8 +146,8 @@ pub fn inspectorType() c.GType {
 
 fn withView(t: c.GType, view: ?*c.GObject) *Object {
     const x = of(c.g_object_new(t, @as([*c]const u8, null)));
-    x.view = view;
-    if (view) |v| c.g_object_add_weak_pointer(v, @ptrCast(&x.view));
+    x.priv.view = view;
+    if (view) |v| c.g_object_add_weak_pointer(v, @ptrCast(&x.priv.view));
     return x;
 }
 
@@ -158,21 +169,21 @@ pub export fn webkit_print_operation_new(view: ?*c.GObject) ?*c.GObject {
 }
 
 export fn webkit_print_operation_get_print_settings(op: *Object) ?*c.GtkPrintSettings {
-    return op.settings;
+    return op.priv.settings;
 }
 
 export fn webkit_print_operation_set_print_settings(op: *Object, s: ?*c.GtkPrintSettings) void {
-    if (op.settings) |old| c.g_object_unref(old);
-    op.settings = if (s) |n| @ptrCast(@alignCast(c.g_object_ref(n))) else null;
+    if (op.priv.settings) |old| c.g_object_unref(old);
+    op.priv.settings = if (s) |n| @ptrCast(@alignCast(c.g_object_ref(n))) else null;
 }
 
 export fn webkit_print_operation_get_page_setup(op: *Object) ?*c.GtkPageSetup {
-    return op.setup;
+    return op.priv.setup;
 }
 
 export fn webkit_print_operation_set_page_setup(op: *Object, s: ?*c.GtkPageSetup) void {
-    if (op.setup) |old| c.g_object_unref(old);
-    op.setup = if (s) |n| @ptrCast(@alignCast(c.g_object_ref(n))) else null;
+    if (op.priv.setup) |old| c.g_object_unref(old);
+    op.priv.setup = if (s) |n| @ptrCast(@alignCast(c.g_object_ref(n))) else null;
 }
 
 const Wait = struct {
@@ -188,10 +199,10 @@ fn waited(data: c.gpointer, ok: c.gboolean) callconv(.c) void {
 
 pub export fn webkit_print_operation_run_dialog(op: *Object, parent: ?*c.GtkWindow) c_int {
     defer c.g_signal_emit(op, print_finished, 0);
-    const sit = proxy_view.sitOf(op.view) orelse return PRINT_CANCEL;
+    const sit = proxy_view.sitOf(op.priv.view) orelse return PRINT_CANCEL;
     var w = Wait{ .loop = c.g_main_loop_new(null, 0).? };
     defer c.g_main_loop_unref(w.loop);
-    c.sit_web_view_print(sit, parent, op.settings, op.setup, 1, waited, &w);
+    c.sit_web_view_print(sit, parent, op.priv.settings, op.priv.setup, 1, waited, &w);
     c.g_main_loop_run(w.loop);
     return if (w.ok != 0) PRINT_PRINT else PRINT_CANCEL;
 }
@@ -203,9 +214,9 @@ fn printedAsync(data: c.gpointer, _: c.gboolean) callconv(.c) void {
 }
 
 export fn webkit_print_operation_print(op: *Object) void {
-    const sit = proxy_view.sitOf(op.view) orelse return c.g_signal_emit(op, print_finished, 0);
+    const sit = proxy_view.sitOf(op.priv.view) orelse return c.g_signal_emit(op, print_finished, 0);
     _ = c.g_object_ref(op);
-    c.sit_web_view_print(sit, null, op.settings, op.setup, 0, printedAsync, op);
+    c.sit_web_view_print(sit, null, op.priv.settings, op.priv.setup, 0, printedAsync, op);
 }
 
 export fn webkit_color_chooser_request_get_type() c.GType {
@@ -213,11 +224,11 @@ export fn webkit_color_chooser_request_get_type() c.GType {
 }
 
 export fn webkit_color_chooser_request_get_rgba(r: *Object, rgba: *c.GdkRGBA) void {
-    rgba.* = r.rgba;
+    rgba.* = r.priv.rgba;
 }
 
 export fn webkit_color_chooser_request_set_rgba(r: *Object, rgba: *const c.GdkRGBA) void {
-    r.rgba = rgba.*;
+    r.priv.rgba = rgba.*;
 }
 
 export fn webkit_color_chooser_request_get_element_rectangle(_: *Object, rect: *c.GdkRectangle) void {
@@ -241,7 +252,7 @@ export fn webkit_web_inspector_get_web_view(_: *Object) ?*c.GObject {
 }
 
 export fn webkit_web_inspector_get_inspected_uri(i: *Object) [*c]const u8 {
-    const v = i.view orelse return null;
+    const v = i.priv.view orelse return null;
     var uri: [*c]const u8 = null;
     c.g_object_get(v, "uri", &uri, @as([*c]const u8, null));
     defer c.g_free(@constCast(uri));
@@ -261,7 +272,7 @@ export fn webkit_web_inspector_get_attached_height(_: *Object) c.guint {
 }
 
 export fn webkit_web_inspector_show(i: *Object) void {
-    const sit = proxy_view.sitOf(i.view) orelse return;
+    const sit = proxy_view.sitOf(i.priv.view) orelse return;
     _ = c.sit_web_view_show_devtools(sit);
 }
 

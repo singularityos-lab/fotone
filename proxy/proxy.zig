@@ -8,6 +8,14 @@ comptime {
     _ = gtkonly;
 }
 
+fn load() callconv(.c) void {
+    _ = gtkonly.webkit_settings_get_type();
+    _ = gtkonly.webkit_window_properties_get_type();
+    _ = gtkonly.webkit_file_chooser_request_get_type();
+}
+
+export const fotone_proxy_load linksection(".init_array") = &load;
+
 test {
     _ = @import("engine.zig");
     _ = gtkonly;
