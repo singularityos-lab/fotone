@@ -16,10 +16,16 @@ engine needs live as patches in `patches/`.
 - `viewer/`: `fotone-viewer`, a window with one `SitWebView`.
 - `sandbox/`: `fotone-sandbox`, which confines web processes with Landlock and seccomp before they start.
 - `hooks/`: engine-side code the patches call into, linked into WebKit as a static library.
+- `ocdm/`: `libocdm`, the OpenCDM interface the engine uses for Encrypted Media. It decrypts
+  ClearKey itself and drives the Widevine module, which `SitWebView` downloads from Google
+  the first time a site asks for it and the user agrees.
 - `proxy/`: `libwebkitgtk-6.0.so.4` and `libjavascriptcoregtk-6.0.so.1` with the WebKitGTK 6.0
   binary interface, so existing GTK 4 applications run on the Fotone engine unchanged.
 - `compat/`: `fotone-compat`, which reports the symbols, types, properties, signals and
   basic behaviour of any `libwebkitgtk-6.0` so the proxy can be diffed against WebKitGTK.
+
+Per-site user agents and engine settings live in `site-exceptions.json`, read from
+`$XDG_CONFIG_HOME/fotone` first and then from the system data directories.
 
 `zig build engine` downloads the pinned release, checks its sha256, applies the patches
 and builds WebKit with the Sinty options.

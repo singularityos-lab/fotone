@@ -25,7 +25,7 @@ const engine_flags = [_][]const u8{
     "-DUSE_GSTREAMER_WEBRTC=ON",
     "-DUSE_LIBRICE=OFF",
     "-DENABLE_ENCRYPTED_MEDIA=ON",
-    "-DENABLE_THUNDER=OFF",
+    "-DENABLE_THUNDER=ON",
     "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-Bsymbolic-functions",
 };
 
@@ -90,8 +90,22 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true }),
     });
 
+    const ocdm_mod = b.createModule(.{ .root_source_file = b.path("ocdm/ocdm.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
+    ocdm_mod.addIncludePath(b.path("ocdm"));
+    ocdm_mod.linkSystemLibrary("gstreamer-1.0", .{});
+    const ocdm = b.addLibrary(.{
+        .name = "ocdm",
+        .linkage = .dynamic,
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .root_module = ocdm_mod,
+        .use_llvm = true,
+    });
+    b.installArtifact(ocdm);
+
     const configure = b.addSystemCommand(&.{ "cmake", "-G", "Ninja", "-S", src, "-B", out });
     configure.addArgs(&engine_flags);
+    configure.addArg(b.fmt("-DTHUNDER_INCLUDE_DIR={s}", .{b.pathFromRoot("ocdm")}));
+    configure.addPrefixedFileArg("-DTHUNDER_LIBRARY=", ocdm.getEmittedBin());
     configure.addPrefixedFileArg("-DFOTONE_HOOKS=", hooks.getEmittedBin());
     configure.step.dependOn(&fetch.step);
 
@@ -123,6 +137,7 @@ pub fn build(b: *std.Build) void {
     });
     webview.installHeader(b.path("webview/sitwebview.h"), "sit/sitwebview.h");
     b.installArtifact(webview);
+    b.installFile("webview/site-exceptions.json", "share/fotone/site-exceptions.json");
 
     const viewer_mod = webviewModule(b, "viewer/main.zig", target, optimize, src, out);
     viewer_mod.addIncludePath(b.path("viewer"));
@@ -169,6 +184,7 @@ pub fn build(b: *std.Build) void {
     const sandbox = b.addExecutable(.{ .name = "fotone-sandbox", .root_module = sandbox_mod });
     b.getInstallStep().dependOn(&b.addInstallArtifact(sandbox, .{ .dest_dir = .{ .override = .{ .custom = "libexec/wpe-webkit-2.0" } } }).step);
 
+
     const t = b.addTest(.{ .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out), .use_llvm = true });
     const wt_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out);
     wt_mod.linkLibrary(platform);
@@ -183,4 +199,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(wt).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hooks.root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
 }

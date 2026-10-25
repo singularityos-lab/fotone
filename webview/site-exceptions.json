@@ -1,0 +1,7 @@
+{
+  "sites": [
+    { "domains": ["teams.microsoft.com", "teams.live.com", "teams.cloud.microsoft"], "user-agent": "chrome" },
+    { "domains": ["meet.google.com"], "user-agent": "chrome" },
+    { "domains": ["open.spotify.com"], "user-agent": "chrome" }
+  ]
+}

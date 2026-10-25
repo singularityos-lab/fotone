@@ -12,6 +12,8 @@ const passwords = @import("passwords.zig");
 const perms = @import("perms.zig");
 const a11y = @import("a11y.zig");
 const dnr = @import("dnr.zig");
+const widevine = @import("widevine.zig");
+const sites = @import("sites.zig");
 
 pub const WebView = extern struct {
     parent: c.GtkWidget,
@@ -454,6 +456,7 @@ fn instanceInit(inst: [*c]c.GTypeInstance, _: c.gpointer) callconv(.c) void {
 fn attach(w: *WebView) void {
     const d = display();
     if (w.web == null) w.web = @ptrCast(@alignCast(c.g_object_new(c.webkit_web_view_get_type(), "display", d, @as([*c]const u8, null))));
+    sites.hook(w.web.?);
     w.toplevel = c.wpe_display_create_toplevel(d, 1);
     w.view = c.webkit_web_view_get_wpe_view(w.web);
     if (w.view) |v| {
@@ -473,6 +476,8 @@ fn attach(w: *WebView) void {
     printHook(w);
     if (c.webkit_web_view_get_user_content_manager(w.web)) |ucm| dnr.track(ucm);
     devtools.apply(w.web.?);
+    c.g_object_set_data(@ptrCast(w.web), "fotone-widget", w);
+    widevine.hook(w.web.?);
     c.fotone_toplevel_set_fullscreen_func(w.toplevel, fullscreen, w, null);
     if (w.transparent != 0) applyBackground(w);
     track(w);
@@ -604,6 +609,7 @@ fn dispose(o: [*c]c.GObject) callconv(.c) void {
     }
     w.view = null;
     if (w.web) |p| {
+        c.g_object_set_data(@ptrCast(p), "fotone-widget", null);
         _ = c.g_signal_handlers_disconnect_matched(p, c.G_SIGNAL_MATCH_DATA, 0, 0, null, null, w);
         if (c.webkit_web_view_get_user_content_manager(p)) |ucm| _ = c.g_signal_handlers_disconnect_matched(ucm, c.G_SIGNAL_MATCH_DATA, 0, 0, null, null, w);
         c.g_object_unref(p);
@@ -750,6 +756,8 @@ test {
     _ = perms;
     _ = a11y;
     _ = dnr;
+    _ = widevine;
+    _ = sites;
 }
 
 test "gestures clamp zoom and need a long swipe" {

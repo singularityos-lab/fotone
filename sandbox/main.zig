@@ -38,7 +38,7 @@ pub const Path = struct {
 const system_ro = [_][]const u8{ "/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/sys", "/proc" };
 const system_rw = [_][]const u8{ "/dev/dri", "/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/shm", "/dev/udmabuf", "/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-modeset", "/dev/nvidia-uvm" };
 const home_ro = [_][]const u8{ ".local/share/fonts", ".fonts", ".config/fontconfig" };
-const home_rw = [_][]const u8{ ".cache/fontconfig", ".cache/gstreamer-1.0" };
+const home_rw = [_][]const u8{ ".cache/fontconfig", ".cache/gstreamer-1.0", ".local/share/fotone/widevine" };
 
 fn abi() u32 {
     const r = linux.syscall3(.landlock_create_ruleset, 0, 0, CREATE_RULESET_VERSION);
@@ -207,6 +207,7 @@ pub fn main(init: std.process.Init) !u8 {
         for (home_ro) |p| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ home, p }), .mode = .ro });
         for (home_rw) |p| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ home, p }), .mode = .rw });
     }
+    if (init.environ_map.get("XDG_DATA_HOME")) |d| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ d, "fotone", "widevine" }), .mode = .rw });
     if (init.environ_map.get("LD_LIBRARY_PATH")) |ld| {
         var it = std.mem.tokenizeScalar(u8, ld, ':');
         while (it.next()) |p| try paths.append(gpa, .{ .path = p, .mode = .ro });
