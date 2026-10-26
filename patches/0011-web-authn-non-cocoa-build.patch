@@ -1,0 +1,235 @@
+--- a/Source/WebKit/UIProcess/WebAuthentication/Authenticator.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/Authenticator.h
+@@ -35,7 +35,9 @@
+ #include <wtf/Forward.h>
+ #include <wtf/RefCounted.h>
+ #include <wtf/WeakPtr.h>
++#if PLATFORM(COCOA)
+ #include <wtf/spi/cocoa/SecuritySPI.h>
++#endif
+ 
+ OBJC_CLASS LAContext;
+ 
+--- a/Source/WebKit/UIProcess/API/APIWebAuthenticationPanelClient.h
++++ b/Source/WebKit/UIProcess/API/APIWebAuthenticationPanelClient.h
+@@ -32,7 +32,9 @@
+ #include <wtf/HashSet.h>
+ #include <wtf/RefCounted.h>
+ #include <wtf/TZoneMallocInlines.h>
++#if PLATFORM(COCOA)
+ #include <wtf/spi/cocoa/SecuritySPI.h>
++#endif
+ #include <wtf/text/WTFString.h>
+ 
+ OBJC_CLASS LAContext;
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/LocalService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/LocalService.h
+@@ -8,6 +8,7 @@
+ namespace WebKit {
+ 
+ class LocalService final : public AuthenticatorTransportService, public RefCounted<LocalService> {
++    WTF_MAKE_TZONE_ALLOCATED(LocalService);
+ public:
+     void ref() const final { RefCounted::ref(); }
+     void deref() const final { RefCounted::deref(); }
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/NfcService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/NfcService.h
+@@ -8,6 +8,7 @@
+ namespace WebKit {
+ 
+ class NfcService final : public AuthenticatorTransportService, public RefCounted<NfcService> {
++    WTF_MAKE_TZONE_ALLOCATED(NfcService);
+ public:
+     void ref() const final { RefCounted::ref(); }
+     void deref() const final { RefCounted::deref(); }
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/CcidService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/CcidService.h
+@@ -8,6 +8,7 @@
+ namespace WebKit {
+ 
+ class CcidService final : public AuthenticatorTransportService, public RefCounted<CcidService> {
++    WTF_MAKE_TZONE_ALLOCATED(CcidService);
+ public:
+     void ref() const final { RefCounted::ref(); }
+     void deref() const final { RefCounted::deref(); }
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/HidService.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/HidService.cpp
+@@ -3,7 +3,11 @@
+ 
+ #if ENABLE(WEB_AUTHN)
+ 
++#include "CcidService.h"
+ #include "CtapHidDriver.h"
++#include "LocalService.h"
++#include "NfcService.h"
++#include <wtf/TZoneMallocInlines.h>
+ 
+ extern "C" {
+ __attribute__((weak)) int fotone_hid_scan(void (*)(void*, const char*), void*);
+@@ -11,6 +15,10 @@
+ 
+ namespace WebKit {
+ 
++WTF_MAKE_TZONE_ALLOCATED_IMPL(LocalService);
++WTF_MAKE_TZONE_ALLOCATED_IMPL(NfcService);
++WTF_MAKE_TZONE_ALLOCATED_IMPL(CcidService);
++
+ Ref<HidService> HidService::create(AuthenticatorTransportServiceObserver& observer)
+ {
+     return adoptRef(*new HidService(observer));
+--- a/Source/WebKit/UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/Mock/MockHidConnection.cpp
+@@ -34,10 +34,12 @@
+ #include <WebCore/FidoConstants.h>
+ #include <WebCore/Pin.h>
+ #include <WebCore/WebAuthenticationConstants.h>
+-#include <wtf/BlockPtr.h>
+ #include <wtf/CryptographicallyRandomNumber.h>
+ #include <wtf/RunLoop.h>
++#if PLATFORM(COCOA)
++#include <wtf/BlockPtr.h>
+ #include <wtf/darwin/DispatchExtras.h>
++#endif
+ #include <wtf/text/Base64.h>
+ 
+ namespace WebKit {
+@@ -83,23 +85,28 @@
+ void MockHidConnection::send(Vector<uint8_t>&& data, DataSentCallback&& callback)
+ {
+     ASSERT(isInitialized());
+-    auto task = makeBlockPtr([weakThis = WeakPtr { *this }, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
++    auto deliver = [weakThis = WeakPtr { *this }, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
++        if (!weakThis) {
++            callback(DataSent::No);
++            return;
++        }
++
++        weakThis->assembleRequest(WTF::move(data));
++
++        auto sent = DataSent::Yes;
++        if (weakThis->stagesMatch() && weakThis->m_configuration.hid->error == Mock::HidError::DataNotSent)
++            sent = DataSent::No;
++        callback(sent);
++    };
++#if PLATFORM(COCOA)
++    auto task = makeBlockPtr([deliver = WTF::move(deliver)]() mutable {
+         ASSERT(!RunLoop::isMain());
+-        RunLoop::mainSingleton().dispatch([weakThis, data = WTF::move(data), callback = WTF::move(callback)]() mutable {
+-            if (!weakThis) {
+-                callback(DataSent::No);
+-                return;
+-            }
+-
+-            weakThis->assembleRequest(WTF::move(data));
+-
+-            auto sent = DataSent::Yes;
+-            if (weakThis->stagesMatch() && weakThis->m_configuration.hid->error == Mock::HidError::DataNotSent)
+-                sent = DataSent::No;
+-            callback(sent);
+-        });
++        RunLoop::mainSingleton().dispatch(WTF::move(deliver));
+     });
+     dispatch_async(globalDispatchQueueSingleton(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), task.get());
++#else
++    RunLoop::mainSingleton().dispatch(WTF::move(deliver));
++#endif
+ }
+ 
+ void MockHidConnection::registerDataReceivedCallbackInternal()
+--- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
++++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
+@@ -67,7 +67,7 @@
+ #include <wtf/text/TextBreakIterator.h>
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+ #include "VirtualAuthenticatorManager.h"
+ #include <WebCore/AuthenticatorTransport.h>
+ #endif
+@@ -2111,7 +2111,7 @@
+ 
+ CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuthenticator(const String& browsingContextHandle, Ref<JSON::Object>&& authenticator)
+ {
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+     auto protocol = authenticator->getString("protocol"_s);
+     SYNC_FAIL_WITH_PREDEFINED_ERROR_AND_DETAILS_IF(!protocol, InvalidParameter, "The parameter 'protocol' is missing or invalid."_s);
+ 
+@@ -2150,7 +2150,7 @@
+ 
+ CommandResult<void> WebAutomationSession::removeVirtualAuthenticator(const String& browsingContextHandle, const String& authenticatorId)
+ {
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+     auto page = webPageProxyForHandle(browsingContextHandle);
+     SYNC_FAIL_WITH_PREDEFINED_ERROR_IF(!page, WindowNotFound);
+ 
+--- a/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.cpp
++++ b/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.cpp
+@@ -103,7 +103,7 @@
+ #include "WebPrivacyHelpers.h"
+ #endif
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+ #include "VirtualAuthenticatorManager.h"
+ #endif // ENABLE(WEB_AUTHN)
+ 
+@@ -2327,6 +2327,7 @@
+         m_authenticatorManager = MockAuthenticatorManager::create(WTF::move(configuration));
+ }
+ 
++#if PLATFORM(COCOA)
+ VirtualAuthenticatorManager& WebsiteDataStore::virtualAuthenticatorManager()
+ {
+     if (!is<VirtualAuthenticatorManager>(m_authenticatorManager.get()))
+@@ -2334,6 +2335,7 @@
+     return downcast<VirtualAuthenticatorManager>(m_authenticatorManager.get());
+ }
+ #endif
++#endif
+ 
+ API::HTTPCookieStore& WebsiteDataStore::cookieStore()
+ {
+--- a/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.h
++++ b/Source/WebKit/UIProcess/WebsiteData/WebsiteDataStore.h
+@@ -351,8 +351,10 @@
+ #if ENABLE(WEB_AUTHN)
+     AuthenticatorManager& authenticatorManager() { return m_authenticatorManager.get(); }
+     void setMockWebAuthenticationConfiguration(WebCore::MockWebAuthenticationConfiguration&&);
++#if PLATFORM(COCOA)
+     VirtualAuthenticatorManager& virtualAuthenticatorManager();
+ #endif
++#endif
+ 
+     const WebsiteDataStoreConfiguration& configuration() const { return m_configuration.get(); }
+ 
+--- a/Source/WebKit/WebProcess/DigitalCredentials/DigitalCredentialsCoordinator.cpp
++++ b/Source/WebKit/WebProcess/DigitalCredentials/DigitalCredentialsCoordinator.cpp
+@@ -28,7 +28,9 @@
+ 
+ #if ENABLE(WEB_AUTHN)
+ #include "DigitalCredentialsCoordinatorMessages.h"
++#if PLATFORM(COCOA)
+ #include "DigitalCredentialsRequestValidatorBridge.h"
++#endif
+ #include "Logging.h"
+ #include "WebPage.h"
+ #include "WebProcess.h"
+@@ -89,8 +91,15 @@
+ 
+ ExceptionOr<Vector<WebCore::ValidatedDigitalCredentialRequest>> DigitalCredentialsCoordinator::validateAndParseDigitalCredentialRequests(const SecurityOrigin& topOrigin, const Document& document, const Vector<UnvalidatedDigitalCredentialRequest>& unvalidatedRequests)
+ {
++#if PLATFORM(COCOA)
+     auto results = DigitalCredentials::validateRequests(topOrigin, document, unvalidatedRequests);
+     return WTF::move(results);
++#else
++    UNUSED_PARAM(topOrigin);
++    UNUSED_PARAM(document);
++    UNUSED_PARAM(unvalidatedRequests);
++    return WebCore::Exception { WebCore::ExceptionCode::NotSupportedError };
++#endif
+ }
+ 
+ void DigitalCredentialsCoordinator::dismissDigitalCredentialsChooser(CompletionHandler<void(bool)>&& completionHandler)

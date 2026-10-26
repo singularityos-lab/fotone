@@ -8,3 +8,4 @@
 0008-webgpu-dawn-gbm.patch
 0009-sinty-media-engine.patch
 0010-xdg-mime-ambiguous-extension.patch
+0011-web-authn-non-cocoa-build.patch
