@@ -40,6 +40,8 @@ pub const WebView = extern struct {
     fs_window: ?*c.GtkWindow,
     transparent: c.gboolean,
     passwords: c.gboolean,
+    surface: ?*c.GdkSurface,
+    rescale: c.gulong,
 };
 
 const Class = extern struct {
@@ -188,6 +190,12 @@ fn sizeAllocate(wd: [*c]c.GtkWidget, width: c_int, height: c_int, _: c_int) call
     if (w.toplevel) |t| c.fotone_toplevel_configure(t, width, height, scaleOf(wd));
 }
 
+fn scaleChanged(_: ?*c.GObject, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c) void {
+    const w = of(data);
+    const wd = widget(w);
+    if (w.toplevel) |t| c.fotone_toplevel_configure(t, c.gtk_widget_get_width(wd), c.gtk_widget_get_height(wd), scaleOf(wd));
+}
+
 fn sleep(w: *WebView) void {
     const web = w.web orelse return;
     if (w.state != null or w.texture == null) return;
@@ -262,6 +270,8 @@ fn map(wd: [*c]c.GtkWidget) callconv(.c) void {
     wake(w);
     w.clock = c.gtk_widget_get_frame_clock(wd);
     if (w.clock) |k| w.paint = c.g_signal_connect_data(k, "after-paint", @ptrCast(&afterPaint), w, null, 0);
+    if (c.gtk_widget_get_native(wd)) |n| w.surface = c.gtk_native_get_surface(n);
+    if (w.surface) |sf| w.rescale = c.g_signal_connect_data(sf, "notify::scale", @ptrCast(&scaleChanged), w, null, 0);
     if (w.view) |v| c.wpe_view_set_toplevel(v, w.toplevel);
 }
 
@@ -271,6 +281,9 @@ fn unmap(wd: [*c]c.GtkWidget) callconv(.c) void {
     if (w.clock) |k| c.g_signal_handler_disconnect(k, w.paint);
     w.clock = null;
     w.paint = 0;
+    if (w.surface) |sf| c.g_signal_handler_disconnect(sf, w.rescale);
+    w.surface = null;
+    w.rescale = 0;
     w.hidden_at = c.g_get_monotonic_time();
     parent_class.?.unmap.?(wd);
 }
