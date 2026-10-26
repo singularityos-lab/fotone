@@ -1,0 +1,1077 @@
+--- a/Source/cmake/OptionsWPE.cmake
++++ b/Source/cmake/OptionsWPE.cmake
+@@ -73,6 +73,7 @@
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_DRAG_SUPPORT PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GAMEPAD PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GPU_PROCESS PRIVATE ON)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGPU PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_CONTROLS_CONTEXT_MENUS PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_RECORDER PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SESSION PRIVATE ${ENABLE_MEDIA_SESSION_DEFAULT})
+@@ -164,6 +165,11 @@
+ 
+ WEBKIT_OPTION_END()
+ 
++if (ENABLE_WEBGPU)
++    WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fblocks)
++    include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/Source/WTF/wtf/sinty" "${CMAKE_SOURCE_DIR}/Source/WebGPU")
++endif ()
++
+ if (NOT ENABLE_WPE_PLATFORM AND NOT ENABLE_WPE_LEGACY_API)
+     message(FATAL_ERROR "At least one of ENABLE_WPE_PLATFORM or ENABLE_WPE_LEGACY_API needs to be enabled")
+ endif ()
+--- a/Source/CMakeLists.txt
++++ b/Source/CMakeLists.txt
+@@ -76,7 +76,7 @@
+     add_subdirectory(WebDriver)
+ endif ()
+ 
+-if (ENABLE_WEBGPU)
++if (ENABLE_WEBGPU AND NOT PORT STREQUAL "WPE")
+     add_subdirectory(WebGPU)
+ endif ()
+ 
+--- a/Source/WTF/wtf/BlockPtr.h
++++ b/Source/WTF/wtf/BlockPtr.h
+@@ -27,7 +27,7 @@
+ 
+ #include <wtf/Platform.h>
+ 
+-#if PLATFORM(COCOA)
++#if PLATFORM(COCOA) || defined(__BLOCKS__)
+ 
+ #include <Block.h>
+ #include <utility>
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -639,6 +639,10 @@
+ #define ENABLE_WEBGPU PLATFORM(COCOA)
+ #endif
+ 
++#if !defined(ENABLE_WEBGPU_BY_DEFAULT) && PLATFORM(WPE) && ENABLE(WEBGPU)
++#define ENABLE_WEBGPU_BY_DEFAULT 1
++#endif
++
+ #if !defined(ENABLE_WEBGPU_BY_DEFAULT) && ((PLATFORM(MAC) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 260000) || PLATFORM(IOS) || PLATFORM(VISION))
+ #define ENABLE_WEBGPU_BY_DEFAULT 1
+ #endif
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -995,7 +995,7 @@
+ #define HAVE_CORE_LOCATION 1
+ #endif
+ 
+-#if PLATFORM(COCOA)
++#if PLATFORM(COCOA) || (PLATFORM(WPE) && defined(USE_GBM) && USE_GBM && defined(ENABLE_WEBGPU) && ENABLE_WEBGPU)
+ #define HAVE_WEBGPU_IMPLEMENTATION 1
+ // FIXME: PlatformHave.h should not depend or defined ENABLE macros.
+ #if !defined(ENABLE_WEBGPU_SWIFT)
+--- a/Source/WTF/wtf/sinty/Block.h
++++ b/Source/WTF/wtf/sinty/Block.h
+@@ -0,0 +1,15 @@
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void* _Block_copy(const void*);
++void _Block_release(const void*);
++
++#ifdef __cplusplus
++}
++#endif
++
++#define Block_copy(...) ((__typeof(__VA_ARGS__))_Block_copy((const void*)(__VA_ARGS__)))
++#define Block_release(...) _Block_release((const void*)(__VA_ARGS__))
+--- a/Source/WebGPU/WebGPU/WebGPU.h
++++ b/Source/WebGPU/WebGPU/WebGPU.h
+@@ -37,10 +37,21 @@
+ #include <swift/bridging>
+ #endif
+ 
++#if defined(__APPLE__)
+ #include <CoreFoundation/CoreFoundation.h>
++#else
++typedef const struct __CFArray* CFArrayRef;
++#ifndef __unsafe_unretained
++#define __unsafe_unretained
++#endif
++#ifndef __counted_by
++#define __counted_by(N)
++#endif
++#endif
+ 
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wnullability-completeness"
++#pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+ 
+ #ifdef __cplusplus
+ 
+@@ -898,7 +909,31 @@
+ typedef void (^WGPUScheduleWorkBlock)(WGPUWorkItem workItem);
+ typedef void (^WGPUDeviceLostBlockCallback)(WGPUDeviceLostReason reason, char const * message);
+ 
++#if defined(__APPLE__)
+ typedef void (^WGPURenderBuffersWereRecreatedBlockCallback)(CFArrayRef ioSurfaces);
++#else
++typedef struct WGPUDmaBufPlane {
++    int fd;
++    uint32_t offset;
++    uint32_t stride;
++} WGPUDmaBufPlane;
++
++typedef struct WGPUDmaBuf {
++    uint32_t width;
++    uint32_t height;
++    uint32_t fourcc;
++    uint32_t planeCount;
++    uint64_t modifier;
++    WGPUDmaBufPlane planes[4];
++} WGPUDmaBuf;
++
++typedef struct WGPUDmaBufArray {
++    size_t count;
++    WGPUDmaBuf const * buffers;
++} WGPUDmaBufArray;
++
++typedef void (^WGPURenderBuffersWereRecreatedBlockCallback)(WGPUDmaBufArray const * renderBuffers);
++#endif
+ typedef void (^WGPUOnSubmittedWorkScheduledCallback)(WGPUWorkItem);
+ typedef void (^WGPUCompositorIntegrationRegisterBlockCallback)(WGPURenderBuffersWereRecreatedBlockCallback renderBuffersWereRecreated, WGPUOnSubmittedWorkScheduledCallback onSubmittedWorkScheduledCallback);
+ 
+@@ -1621,6 +1656,9 @@
+ 
+ #endif  // !defined(WGPU_SKIP_PROCS)
+ 
++#if !defined(__APPLE__) && defined(__cplusplus)
++extern "C" {
++#endif
+ #if !defined(WGPU_SKIP_DECLARATIONS)
+ 
+ WGPU_EXPORT WGPUInstance wgpuCreateInstance(WGPU_NULLABLE WGPUInstanceDescriptor const * descriptor) WGPU_FUNCTION_ATTRIBUTE;
+@@ -1865,6 +1903,9 @@
+ WGPU_EXPORT WGPUBool wgpuDeviceIsValid(WGPUDevice device) WGPU_FUNCTION_ATTRIBUTE;
+ WGPU_EXPORT WGPUBool wgpuPipelineLayoutIsValid(WGPUPipelineLayout pipelineLayout) WGPU_FUNCTION_ATTRIBUTE;
+ WGPU_EXPORT WGPUBool wgpuPresentationContextIsValid(WGPUSurface presentationContext) WGPU_FUNCTION_ATTRIBUTE;
++#if !defined(__APPLE__)
++WGPU_EXPORT int wgpuSurfaceTakeFence(WGPUSurface surface) WGPU_FUNCTION_ATTRIBUTE;
++#endif
+ WGPU_EXPORT WGPUBool wgpuQuerySetIsValid(WGPUQuerySet querySet) WGPU_FUNCTION_ATTRIBUTE;
+ WGPU_EXPORT WGPUBool wgpuQueueIsValid(WGPUQueue queue) WGPU_FUNCTION_ATTRIBUTE;
+ WGPU_EXPORT WGPUBool wgpuRenderBundleEncoderIsValid(WGPURenderBundleEncoder renderBundleEncoder) WGPU_FUNCTION_ATTRIBUTE;
+@@ -1900,6 +1941,9 @@
+ 
+ WGPU_EXPORT std::span<uint8_t> wgpuBufferGetBufferContents(WGPUBuffer buffer) WGPU_FUNCTION_ATTRIBUTE;
+ WGPU_EXPORT std::span<uint8_t> wgpuBufferGetMappedRange(WGPUBuffer buffer, size_t offset, size_t size) WGPU_FUNCTION_ATTRIBUTE;
++#if !defined(__APPLE__) && defined(__cplusplus)
++}
++#endif
+ 
+ #endif
+ 
+--- a/Source/WebGPU/WebGPU/WebGPUExt.h
++++ b/Source/WebGPU/WebGPU/WebGPUExt.h
+@@ -29,12 +29,16 @@
+ #ifdef __cplusplus
+ 
+ #include <WebGPU/WebGPU.h>
++#if defined(__APPLE__)
+ #include <CoreGraphics/CGImage.h>
+ #ifndef __swift__
+ // Swift C++ Interop does not support extern C. This header has that.
+ #include <CoreVideo/CoreVideo.h>
+ #endif
+ #include <IOSurface/IOSurfaceRef.h>
++#else
++typedef struct __CVBuffer* CVPixelBufferRef;
++#endif
+ 
+ #ifdef NDEBUG
+ #define WGPU_FUZZER_ASSERT_NOT_REACHED(...) (WTFLogAlways(__VA_ARGS__), ASSERT_WITH_SECURITY_IMPLICATION(0))
+@@ -43,9 +47,11 @@
+ #endif
+ 
+ #include <optional>
++#if defined(__APPLE__)
+ #include <simd/simd.h>
+ #include <wtf/MachSendRight.h>
+ #include <wtf/RetainPtr.h>
++#endif
+ #include <wtf/Vector.h>
+ 
+ #ifdef __swift__
+@@ -91,6 +97,9 @@
+ 
+ #endif  // !defined(WGPU_SKIP_PROCS)
+ 
++#if !defined(__APPLE__) && defined(__cplusplus)
++extern "C" {
++#endif
+ #if !defined(WGPU_SKIP_DECLARATIONS)
+ 
+ WGPU_EXPORT void wgpuRenderBundleSetLabel(WGPURenderBundle renderBundle, char const * label);
+@@ -122,9 +131,13 @@
+ 
+ WGPU_EXPORT WGPUBool wgpuAdapterXRCompatible(WGPUAdapter adapter) WGPU_FUNCTION_ATTRIBUTE;
+ 
++#if defined(__APPLE__)
+ WGPU_EXPORT void wgpuXRProjectionLayerStartFrame(WGPUXRProjectionLayer layer, size_t frameIndex, WTF::MachSendRight&& colorBuffer, WTF::MachSendRight&& depthBuffer, WTF::MachSendRight&& completionSyncEvent, size_t reusableTextureIndex, unsigned screenWidth, unsigned screenHeight, Vector<float>&& horizontalSamplesLeft, Vector<float>&& horizontalSamplesRight, Vector<float>&& verticalSamples) WGPU_FUNCTION_ATTRIBUTE;
++#endif
+ 
++#if defined(__APPLE__)
+ WGPU_EXPORT RetainPtr<CGImageRef> wgpuSwapChainGetTextureAsNativeImage(WGPUSwapChain swapChain, uint32_t bufferIndex, bool& isIOSurfaceSupportedFormat);
++#endif
+ WGPU_EXPORT WGPUBool wgpuExternalTextureIsValid(WGPUExternalTexture externalTexture) WGPU_FUNCTION_ATTRIBUTE;
+ 
+ WGPU_EXPORT void wgpuDeviceClearDeviceLostCallback(WGPUDevice device) WGPU_FUNCTION_ATTRIBUTE;
+@@ -133,6 +146,9 @@
+ #endif  // !defined(WGPU_SKIP_DECLARATIONS)
+ 
+ WGPU_EXPORT String wgpuAdapterFeatureName(WGPUFeatureName feature) WGPU_FUNCTION_ATTRIBUTE;
++#if !defined(__APPLE__) && defined(__cplusplus)
++}
++#endif
+ 
+ #endif
+ 
+--- a/Source/WebCore/Modules/WebGPU/GPUCompositorIntegration.cpp
++++ b/Source/WebCore/Modules/WebGPU/GPUCompositorIntegration.cpp
+@@ -35,6 +35,18 @@
+ }
+ #endif
+ 
++#if USE(GBM)
++bool GPUCompositorIntegration::recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&& destinationColorSpace, WebCore::AlphaPremultiplication alphaMode, WebCore::WebGPU::TextureFormat textureFormat, unsigned bufferCount, WebCore::WebGPU::Device& device) const
++{
++    return m_backing->recreateRenderBuffers(width, height, WTF::move(destinationColorSpace), alphaMode, textureFormat, bufferCount, device);
++}
++
++void GPUCompositorIntegration::prepareForDisplay(uint32_t frameIndex, WebGPU::CompositorIntegration::DisplayBufferHandler&& completionHandler)
++{
++    m_backing->prepareForDisplay(frameIndex, WTF::move(completionHandler));
++}
++#endif
++
+ void GPUCompositorIntegration::prepareForDisplay(uint32_t frameIndex, CompletionHandler<void()>&& completionHandler)
+ {
+     m_backing->prepareForDisplay(frameIndex, WTF::move(completionHandler));
+--- a/Source/WebCore/Modules/WebGPU/GPUCompositorIntegration.h
++++ b/Source/WebCore/Modules/WebGPU/GPUCompositorIntegration.h
+@@ -53,6 +53,11 @@
+     Vector<MachSendRight> recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, WebCore::WebGPU::Device&) const;
+ #endif
+ 
++#if USE(GBM)
++    bool recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, WebCore::WebGPU::Device&) const;
++    void prepareForDisplay(uint32_t frameIndex, WebGPU::CompositorIntegration::DisplayBufferHandler&&);
++#endif
++
+     void prepareForDisplay(uint32_t frameIndex, CompletionHandler<void()>&&);
+ 
+     WebGPU::CompositorIntegration& backing() { return m_backing; }
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUCompositorIntegrationImpl.cpp
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUCompositorIntegrationImpl.cpp
+@@ -32,13 +32,23 @@
+ #include "WebGPUDevice.h"
+ #include "WebGPUQueue.h"
+ #include "WebGPUTextureFormat.h"
+-#include <CoreFoundation/CoreFoundation.h>
+-#include <WebCore/IOSurface.h>
+ #include <WebCore/NativeImage.h>
+ #include <WebGPU/WebGPUExt.h>
+-#include <pal/spi/cg/CoreGraphicsSPI.h>
+ #include <wtf/TZoneMallocInlines.h>
++
++#if PLATFORM(COCOA)
++#include <CoreFoundation/CoreFoundation.h>
++#include <WebCore/IOSurface.h>
++#include <pal/spi/cg/CoreGraphicsSPI.h>
+ #include <wtf/spi/cocoa/IOSurfaceSPI.h>
++#endif
++
++#if USE(GBM)
++#include "DRMDeviceManager.h"
++#include "GBMDevice.h"
++#include <drm_fourcc.h>
++#include <gbm.h>
++#endif
+ 
+ namespace WebCore::WebGPU {
+ 
+@@ -59,6 +69,117 @@
+     m_onSubmittedWorkScheduledCallback(WTF::move(completionHandler));
+ }
+ 
++#if USE(GBM)
++static uint32_t fourccForTextureFormat(TextureFormat textureFormat)
++{
++    switch (textureFormat) {
++    case TextureFormat::Rgba8unorm:
++    case TextureFormat::Rgba8unormSRGB:
++        return DRM_FORMAT_ABGR8888;
++    case TextureFormat::Rgba16float:
++        return DRM_FORMAT_ABGR16161616F;
++    default:
++        return DRM_FORMAT_ARGB8888;
++    }
++}
++
++static uint64_t nextRenderBufferID()
++{
++    static std::atomic<uint64_t> lastID { 0 };
++    return ++lastID;
++}
++
++static std::optional<DMABufBufferAttributes> duplicateAttributes(const DMABufBufferAttributes& attributes)
++{
++    DMABufBufferAttributes copy;
++    copy.size = attributes.size;
++    copy.fourcc = attributes.fourcc;
++    copy.offsets = attributes.offsets;
++    copy.strides = attributes.strides;
++    copy.modifier = attributes.modifier;
++    for (auto& fd : attributes.fds) {
++        auto duplicate = fd.duplicate();
++        if (!duplicate)
++            return std::nullopt;
++        copy.fds.append(WTF::move(duplicate));
++    }
++    return copy;
++}
++
++bool CompositorIntegrationImpl::recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, TextureFormat textureFormat, unsigned bufferCount, Device& device)
++{
++    m_renderBuffers.clear();
++    m_device = device;
++
++    if (RefPtr presentationContext = m_presentationContext) {
++        static_cast<PresentationContext*>(presentationContext.get())->unconfigure();
++        presentationContext->setSize(width, height);
++    }
++
++    constexpr int max2DTextureSize = 16384;
++    width = std::max(1, std::min(max2DTextureSize, width));
++    height = std::max(1, std::min(max2DTextureSize, height));
++
++    auto gbmDevice = DRMDeviceManager::singleton().mainGBMDevice(DRMDeviceManager::NodeType::Render);
++    if (gbmDevice) {
++        auto fourcc = fourccForTextureFormat(textureFormat);
++        for (unsigned bufferIndex = 0; bufferIndex < std::min<unsigned>(3u, bufferCount); ++bufferIndex) {
++            auto* bo = gbm_bo_create(gbmDevice->device(), width, height, fourcc, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
++            if (!bo)
++                break;
++            auto attributes = DMABufBufferAttributes::fromGBMBufferObject(bo);
++            gbm_bo_destroy(bo);
++            if (!attributes || attributes->fds.size() > 4)
++                break;
++            if (attributes->modifier == DRM_FORMAT_MOD_INVALID)
++                attributes->modifier = DRM_FORMAT_MOD_LINEAR;
++            m_renderBuffers.append({ nextRenderBufferID(), WTF::move(*attributes), false });
++        }
++    }
++
++    Vector<WGPUDmaBuf> buffers;
++    for (auto& renderBuffer : m_renderBuffers) {
++        auto& attributes = renderBuffer.attributes;
++        WGPUDmaBuf buffer { };
++        buffer.width = attributes.size.width();
++        buffer.height = attributes.size.height();
++        buffer.fourcc = attributes.fourcc.value;
++        buffer.modifier = attributes.modifier;
++        buffer.planeCount = attributes.fds.size();
++        for (size_t plane = 0; plane < attributes.fds.size(); ++plane)
++            buffer.planes[plane] = { attributes.fds[plane].value(), attributes.offsets[plane], attributes.strides[plane] };
++        buffers.append(buffer);
++    }
++
++    WGPUDmaBufArray array { buffers.size(), buffers.span().data() };
++    if (m_renderBuffersWereRecreatedCallback)
++        m_renderBuffersWereRecreatedCallback(&array);
++
++    return !m_renderBuffers.isEmpty();
++}
++
++void CompositorIntegrationImpl::prepareForDisplay(uint32_t frameIndex, DisplayBufferHandler&& completionHandler)
++{
++    RefPtr presentationContext = m_presentationContext;
++    if (!presentationContext || m_renderBuffers.isEmpty())
++        return completionHandler(0, std::nullopt, { });
++
++    presentationContext->present(frameIndex);
++    auto fence = presentationContext->takeFence();
++
++    auto& renderBuffer = m_renderBuffers[frameIndex % m_renderBuffers.size()];
++    std::optional<DMABufBufferAttributes> attributes;
++    if (!renderBuffer.sent) {
++        attributes = duplicateAttributes(renderBuffer.attributes);
++        renderBuffer.sent = !!attributes;
++    }
++
++    m_onSubmittedWorkScheduledCallback([completionHandler = WTF::move(completionHandler), id = renderBuffer.id, attributes = WTF::move(attributes), fence = WTF::move(fence)]() mutable {
++        completionHandler(id, WTF::move(attributes), WTF::move(fence));
++    });
++}
++#endif
++
+ void CompositorIntegrationImpl::updateContentsHeadroom(float headroom)
+ {
+ #if HAVE(SUPPORT_HDR_DISPLAY)
+@@ -120,6 +241,10 @@
+ 
+ void CompositorIntegrationImpl::withDisplayBufferAsNativeImage(uint32_t bufferIndex, Function<void(WebCore::NativeImage*)> completion)
+ {
++#if !PLATFORM(COCOA)
++    UNUSED_PARAM(bufferIndex);
++    completion(nullptr);
++#else
+     if (!m_renderBuffers.size() || bufferIndex >= m_renderBuffers.size() || !m_device)
+         return completion(nullptr);
+ 
+@@ -144,6 +269,7 @@
+ 
+     CGImageSetCachingFlags(displayImage->platformImage().get(), kCGImageCachingTransient);
+     completion(displayImage.get());
++#endif
+ }
+ 
+ void CompositorIntegrationImpl::paintCompositedResultsToCanvas(WebCore::ImageBuffer&, uint32_t)
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUCompositorIntegrationImpl.h
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUCompositorIntegrationImpl.h
+@@ -30,7 +30,9 @@
+ #include "WebGPUCompositorIntegration.h"
+ 
+ #include "WebGPUPresentationContextImpl.h"
++#if PLATFORM(COCOA)
+ #include <WebCore/IOSurface.h>
++#endif
+ #include <WebGPU/WebGPU.h>
+ #include <wtf/CompletionHandler.h>
+ #include <wtf/Function.h>
+@@ -68,7 +70,13 @@
+         m_presentationContext = presentationContext;
+     }
+ 
+-    void registerCallbacks(WTF::Function<void(CFArrayRef)>&& renderBuffersWereRecreatedCallback, WTF::Function<void(CompletionHandler<void()>&&)>&& onSubmittedWorkScheduledCallback)
++#if PLATFORM(COCOA)
++    using RenderBuffersWereRecreatedCallback = WTF::Function<void(CFArrayRef)>;
++#else
++    using RenderBuffersWereRecreatedCallback = WTF::Function<void(const WGPUDmaBufArray*)>;
++#endif
++
++    void registerCallbacks(RenderBuffersWereRecreatedCallback&& renderBuffersWereRecreatedCallback, WTF::Function<void(CompletionHandler<void()>&&)>&& onSubmittedWorkScheduledCallback)
+     {
+         ASSERT(!m_renderBuffersWereRecreatedCallback);
+         m_renderBuffersWereRecreatedCallback = WTF::move(renderBuffersWereRecreatedCallback);
+@@ -99,9 +107,22 @@
+ 
+     Vector<UniqueRef<WebCore::IOSurface>> m_renderBuffers;
+     WebCore::AlphaPremultiplication m_alphaMode { WebCore::AlphaPremultiplication::Premultiplied };
+-    WTF::Function<void(CFArrayRef)> m_renderBuffersWereRecreatedCallback;
+ #endif
+ 
++#if USE(GBM)
++    bool recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, Device&) override;
++    void prepareForDisplay(uint32_t frameIndex, DisplayBufferHandler&&) override;
++
++    struct RenderBuffer {
++        uint64_t id { 0 };
++        WebCore::DMABufBufferAttributes attributes;
++        bool sent { false };
++    };
++    Vector<RenderBuffer> m_renderBuffers;
++#endif
++
++    RenderBuffersWereRecreatedCallback m_renderBuffersWereRecreatedCallback;
++
+     WTF::Function<void(CompletionHandler<void()>&&)> m_onSubmittedWorkScheduledCallback;
+ 
+     RefPtr<PresentationContextImpl> m_presentationContext;
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUDeviceImpl.cpp
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUDeviceImpl.cpp
+@@ -62,7 +62,9 @@
+ #include "WebGPUTextureViewImpl.h"
+ #include "WebGPUValidationError.h"
+ #include "WebGPUXRBindingImpl.h"
++#if PLATFORM(COCOA)
+ #include <CoreGraphics/CGColorSpace.h>
++#endif
+ #include <WebGPU/WebGPUExt.h>
+ #include <wtf/BlockPtr.h>
+ #include <wtf/SegmentedVector.h>
+@@ -186,19 +188,27 @@
+     return WGPUColorSpace::SRGB;
+ }
+ 
++#if PLATFORM(COCOA) && ENABLE(VIDEO)
+ void DeviceImpl::updateExternalTexture(const WebCore::WebGPU::ExternalTexture&, const WebCore::MediaPlayerIdentifier&)
+ {
+     RELEASE_ASSERT_NOT_REACHED();
+ }
++#endif
+ 
+ RefPtr<ExternalTexture> DeviceImpl::importExternalTexture(const ExternalTextureDescriptor& descriptor)
+ {
+     auto label = descriptor.label.utf8();
+ 
++#if PLATFORM(COCOA)
+     auto pixelBuffer = std::get_if<RetainPtr<CVPixelBufferRef>>(&descriptor.videoBacking);
++#endif
+     WGPUExternalTextureDescriptor backingDescriptor {
+         .label = label.data(),
++#if PLATFORM(COCOA)
+         .pixelBuffer = pixelBuffer ? pixelBuffer->get() : nullptr,
++#else
++        .pixelBuffer = nullptr,
++#endif
+         .colorSpace = convertToWGPUColorSpace(descriptor.colorSpace),
+     };
+     return ExternalTextureImpl::create(adoptWebGPU(wgpuDeviceImportExternalTexture(m_backing.get(), &backingDescriptor)), descriptor, m_convertToBackingContext);
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUDeviceImpl.h
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUDeviceImpl.h
+@@ -73,7 +73,9 @@
+     RefPtr<Texture> createTexture(const TextureDescriptor&) final;
+     RefPtr<Sampler> createSampler(const SamplerDescriptor&) final;
+     RefPtr<ExternalTexture> importExternalTexture(const ExternalTextureDescriptor&) final;
++#if PLATFORM(COCOA) && ENABLE(VIDEO)
+     void NODELETE updateExternalTexture(const WebCore::WebGPU::ExternalTexture&, const WebCore::MediaPlayerIdentifier&) final;
++#endif
+ 
+     RefPtr<BindGroupLayout> createBindGroupLayout(const BindGroupLayoutDescriptor&) final;
+     RefPtr<PipelineLayout> createPipelineLayout(const PipelineLayoutDescriptor&) final;
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUPresentationContextImpl.cpp
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUPresentationContextImpl.cpp
+@@ -167,12 +167,23 @@
+ 
+ RefPtr<WebCore::NativeImage> PresentationContextImpl::getMetalTextureAsNativeImage(uint32_t bufferIndex, bool& isIOSurfaceSupportedFormat)
+ {
++#if PLATFORM(COCOA)
+     if (auto* surface = m_swapChain.get())
+         return WebCore::NativeImage::create(wgpuSwapChainGetTextureAsNativeImage(surface, bufferIndex, isIOSurfaceSupportedFormat));
+-
++#else
++    UNUSED_PARAM(bufferIndex);
++    isIOSurfaceSupportedFormat = false;
++#endif
+     return nullptr;
+ }
+ 
++#if USE(GBM)
++WTF::UnixFileDescriptor PresentationContextImpl::takeFence()
++{
++    return WTF::UnixFileDescriptor { wgpuSurfaceTakeFence(m_backing.get()), WTF::UnixFileDescriptor::Adopt };
++}
++#endif
++
+ } // namespace WebCore::WebGPU
+ 
+ #endif // HAVE(WEBGPU_IMPLEMENTATION)
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUPresentationContextImpl.h
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUPresentationContextImpl.h
+@@ -31,8 +31,13 @@
+ #include "WebGPUPresentationContext.h"
+ #include "WebGPUPtr.h"
+ #include "WebGPUTextureFormat.h"
++#if PLATFORM(COCOA)
+ #include <IOSurface/IOSurfaceRef.h>
++#endif
+ #include <WebGPU/WebGPU.h>
++#if USE(GBM)
++#include <wtf/unix/UnixFileDescriptor.h>
++#endif
+ #include <wtf/TZoneMalloc.h>
+ 
+ namespace WebCore::WebGPU {
+@@ -57,6 +62,9 @@
+     WGPUSurface backing() const { return m_backing.get(); }
+     bool isPresentationContextImpl() const final { return true; }
+     RefPtr<WebCore::NativeImage> getMetalTextureAsNativeImage(uint32_t bufferIndex, bool& isIOSurfaceSupportedFormat) final;
++#if USE(GBM)
++    WTF::UnixFileDescriptor takeFence();
++#endif
+ 
+ private:
+     friend class DowncastConvertToBackingContext;
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUXRProjectionLayerImpl.cpp
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUXRProjectionLayerImpl.cpp
+@@ -33,7 +33,9 @@
+ #include "WebGPUDevice.h"
+ #include "WebGPUTextureFormat.h"
+ #include "WebXRRigidTransform.h"
++#if PLATFORM(COCOA)
+ #include <wtf/MachSendRight.h>
++#endif
+ 
+ namespace WebCore::WebGPU {
+ 
+@@ -104,7 +106,7 @@
+ #endif
+ }
+ 
+-// WebXRLayer
++#if PLATFORM(COCOA)
+ void XRProjectionLayerImpl::startFrame(size_t frameIndex, MachSendRight&& colorBuffer, MachSendRight&& depthBuffer, MachSendRight&& completionSyncEvent, size_t reusableTextureIndex, PlatformXR::RateMapDescription&& rateMap)
+ {
+ #if ENABLE(WEBXR)
+@@ -118,11 +120,14 @@
+     UNUSED_PARAM(rateMap);
+ #endif
+ }
++#endif
+ 
++#if PLATFORM(COCOA)
+ void XRProjectionLayerImpl::endFrame()
+ {
+     return;
+ }
++#endif
+ 
+ } // namespace WebCore::WebGPU
+ 
+--- a/Source/WebCore/Modules/WebGPU/Implementation/WebGPUXRProjectionLayerImpl.h
++++ b/Source/WebCore/Modules/WebGPU/Implementation/WebGPUXRProjectionLayerImpl.h
+@@ -78,6 +78,9 @@
+ #if PLATFORM(COCOA)
+     void NODELETE startFrame(size_t frameIndex, MachSendRight&& colorBuffer, MachSendRight&& depthBuffer, MachSendRight&& completionSyncEvent, size_t reusableTextureIndex, PlatformXR::RateMapDescription&&) final;
+     void NODELETE endFrame() final;
++#else
++    void startFrame(PlatformXR::FrameData&) final { }
++    void endFrame(PlatformXR::DeviceLayer&) final { }
+ #endif
+ 
+     WebGPUPtr<WGPUXRProjectionLayer> m_backing;
+--- a/Source/WebCore/Modules/WebGPU/InternalAPI/WebGPUCompositorIntegration.h
++++ b/Source/WebCore/Modules/WebGPU/InternalAPI/WebGPUCompositorIntegration.h
+@@ -41,6 +41,11 @@
+ #include <wtf/Vector.h>
+ #endif
+ 
++#if USE(GBM)
++#include <WebCore/DMABufBufferAttributes.h>
++#include <wtf/unix/UnixFileDescriptor.h>
++#endif
++
+ namespace WebCore {
+ class DestinationColorSpace;
+ class ImageBuffer;
+@@ -61,6 +66,12 @@
+     virtual Vector<MachSendRight> recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, Device&) = 0;
+ #endif
+ 
++#if USE(GBM)
++    using DisplayBufferHandler = CompletionHandler<void(uint64_t, std::optional<WebCore::DMABufBufferAttributes>&&, WTF::UnixFileDescriptor&&)>;
++    virtual bool recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, Device&) = 0;
++    virtual void prepareForDisplay(uint32_t frameIndex, DisplayBufferHandler&&) = 0;
++#endif
++
+     virtual void prepareForDisplay(uint32_t frameIndex, CompletionHandler<void()>&&) = 0;
+     virtual void withDisplayBufferAsNativeImage(uint32_t bufferIndex, Function<void(WebCore::NativeImage*)>) = 0;
+     virtual void paintCompositedResultsToCanvas(WebCore::ImageBuffer&, uint32_t bufferIndex) = 0;
+--- a/Source/WebCore/html/canvas/GPUCanvasContext.cpp
++++ b/Source/WebCore/html/canvas/GPUCanvasContext.cpp
+@@ -33,7 +33,7 @@
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(GPUCanvasContext);
+ 
+-#if !PLATFORM(COCOA)
++#if !PLATFORM(COCOA) && !(HAVE(WEBGPU_IMPLEMENTATION) && USE(GBM))
+ std::unique_ptr<GPUCanvasContext> GPUCanvasContext::create(CanvasBase&, GPU&, Document*)
+ {
+     return nullptr;
+--- a/Source/WebCore/html/canvas/GPUCanvasContextGBM.cpp
++++ b/Source/WebCore/html/canvas/GPUCanvasContextGBM.cpp
+@@ -0,0 +1,202 @@
++#include "config.h"
++#include "GPUCanvasContextGBM.h"
++
++#if HAVE(WEBGPU_IMPLEMENTATION) && USE(GBM)
++
++#include "CoordinatedPlatformLayerBufferDMABuf.h"
++#include "DMABufBuffer.h"
++#include "DestinationColorSpace.h"
++#include "GPU.h"
++#include "GPUDevice.h"
++#include "GPUPresentationContextDescriptor.h"
++#include "GPUTextureFormat.h"
++#include "GraphicsLayerContentsDisplayDelegateCoordinated.h"
++#include "HTMLCanvasElement.h"
++#include "OffscreenCanvas.h"
++#include "TextureMapperFlags.h"
++#include <wtf/TZoneMallocInlines.h>
++
++namespace WebCore {
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(GPUCanvasContextGBM);
++
++static constexpr unsigned renderBufferCount = 3;
++
++static bool isSupportedFormat(GPUTextureFormat format)
++{
++    return format == GPUTextureFormat::Bgra8unorm || format == GPUTextureFormat::Rgba8unorm || format == GPUTextureFormat::Rgba16float;
++}
++
++std::unique_ptr<GPUCanvasContext> GPUCanvasContext::create(CanvasBase& canvas, GPU& gpu, Document*)
++{
++    RefPtr compositorIntegration = gpu.createCompositorIntegration();
++    if (!compositorIntegration)
++        return nullptr;
++
++    RefPtr presentationContext = gpu.createPresentationContext({ *compositorIntegration });
++    if (!presentationContext)
++        return nullptr;
++
++    std::unique_ptr<GPUCanvasContextGBM> context { new GPUCanvasContextGBM(canvas, compositorIntegration.releaseNonNull(), presentationContext.releaseNonNull()) };
++    context->suspendIfNeeded();
++    return context;
++}
++
++GPUCanvasContextGBM::GPUCanvasContextGBM(CanvasBase& canvas, Ref<GPUCompositorIntegration>&& compositorIntegration, Ref<GPUPresentationContext>&& presentationContext)
++    : GPUCanvasContext(canvas)
++    , m_layerContentsDisplayDelegate(GraphicsLayerContentsDisplayDelegateCoordinated::create())
++    , m_compositorIntegration(WTF::move(compositorIntegration))
++    , m_presentationContext(WTF::move(presentationContext))
++{
++}
++
++GPUCanvasContextGBM::~GPUCanvasContextGBM() = default;
++
++GPUCanvasContext::CanvasType GPUCanvasContextGBM::canvas()
++{
++    Ref base = canvasBase();
++#if ENABLE(OFFSCREEN_CANVAS)
++    if (RefPtr offscreen = dynamicDowncast<OffscreenCanvas>(base.get()))
++        return offscreen.releaseNonNull();
++#endif
++    return downcast<HTMLCanvasElement>(base.get());
++}
++
++RefPtr<GraphicsLayerContentsDisplayDelegate> GPUCanvasContextGBM::layerContentsDisplayDelegate()
++{
++    return m_layerContentsDisplayDelegate.copyRef();
++}
++
++PixelFormat GPUCanvasContextGBM::pixelFormat() const
++{
++#if ENABLE(PIXEL_FORMAT_RGBA16F)
++    if (m_configuration && m_configuration->format == GPUTextureFormat::Rgba16float)
++        return PixelFormat::RGBA16F;
++#endif
++    return isOpaque() ? PixelFormat::BGRX8 : PixelFormat::BGRA8;
++}
++
++bool GPUCanvasContextGBM::isOpaque() const
++{
++    return !m_configuration || m_configuration->alphaMode == GPUCanvasAlphaMode::Opaque;
++}
++
++ExceptionOr<void> GPUCanvasContextGBM::configure(GPUCanvasConfiguration&& configuration)
++{
++    if (!isSupportedFormat(configuration.format))
++        return Exception { ExceptionCode::TypeError, "GPUCanvasContext.configure: the canvas format must be bgra8unorm, rgba8unorm or rgba16float."_s };
++
++    auto size = canvasBase().size();
++    m_width = std::max(1, size.width());
++    m_height = std::max(1, size.height());
++
++    auto alphaMode = configuration.alphaMode == GPUCanvasAlphaMode::Opaque ? AlphaPremultiplication::Unpremultiplied : AlphaPremultiplication::Premultiplied;
++    auto colorSpace = DestinationColorSpace::SRGB();
++    if (!m_compositorIntegration->recreateRenderBuffers(m_width, m_height, WTF::move(colorSpace), alphaMode, convertToBacking(configuration.format), renderBufferCount, configuration.device->backing()))
++        return Exception { ExceptionCode::OperationError, "GPUCanvasContext.configure: the canvas buffers could not be allocated."_s };
++
++    m_currentTexture = nullptr;
++    m_displayBuffers.clear();
++    if (!m_presentationContext->configure(configuration, m_width, m_height, true))
++        return Exception { ExceptionCode::InvalidStateError, "GPUCanvasContext.configure: the presentation context could not be configured."_s };
++
++    m_configuration = WTF::move(configuration);
++    markContextChangedAndNotifyCanvasObservers();
++    return { };
++}
++
++void GPUCanvasContextGBM::unconfigure()
++{
++    m_presentationContext->unconfigure();
++    m_configuration = std::nullopt;
++    m_currentTexture = nullptr;
++    m_displayBuffers.clear();
++}
++
++std::optional<GPUCanvasConfiguration> GPUCanvasContextGBM::getConfiguration() const
++{
++    if (!m_configuration)
++        return std::nullopt;
++    return GPUCanvasConfiguration { m_configuration->device.copyRef(), m_configuration->format, m_configuration->usage, m_configuration->viewFormats, m_configuration->colorSpace, m_configuration->toneMapping, m_configuration->alphaMode };
++}
++
++ExceptionOr<Ref<GPUTexture>> GPUCanvasContextGBM::getCurrentTexture()
++{
++    if (!m_configuration)
++        return Exception { ExceptionCode::InvalidStateError, "GPUCanvasContext.getCurrentTexture: the canvas is not configured."_s };
++
++    if (!m_currentTexture) {
++        m_currentTexture = m_presentationContext->getCurrentTexture(m_frameIndex);
++        markContextChangedAndNotifyCanvasObservers();
++    }
++
++    if (!m_currentTexture)
++        return Exception { ExceptionCode::OperationError, "GPUCanvasContext.getCurrentTexture: no texture is available."_s };
++    return Ref { *m_currentTexture };
++}
++
++void GPUCanvasContextGBM::didUpdateCanvasSizeProperties(bool sizeChanged)
++{
++    if (!sizeChanged || !m_configuration)
++        return;
++
++    auto configuration = getConfiguration();
++    auto result = configure(WTF::move(*configuration));
++    UNUSED_VARIABLE(result);
++}
++
++void GPUCanvasContextGBM::markContextChangedAndNotifyCanvasObservers()
++{
++    m_compositingResultsNeedsUpdating = true;
++    markCanvasChanged();
++}
++
++void GPUCanvasContextGBM::prepareForDisplay()
++{
++    if (!m_configuration || !m_compositingResultsNeedsUpdating)
++        return;
++
++    auto frameIndex = m_frameIndex;
++    m_compositorIntegration->prepareForDisplay(frameIndex, WebGPU::CompositorIntegration::DisplayBufferHandler { [this](uint64_t bufferID, std::optional<DMABufBufferAttributes>&& attributes, UnixFileDescriptor&& fence) {
++        setDisplayBuffer(bufferID, WTF::move(attributes), WTF::move(fence));
++    } });
++    m_presentationContext->present(frameIndex);
++    m_currentTexture = nullptr;
++    m_frameIndex = (m_frameIndex + 1) % renderBufferCount;
++    m_compositingResultsNeedsUpdating = false;
++}
++
++void GPUCanvasContextGBM::setDisplayBuffer(uint64_t bufferID, std::optional<DMABufBufferAttributes>&& attributes, UnixFileDescriptor&& fence)
++{
++    if (!bufferID)
++        return;
++
++    RefPtr<DMABufBuffer> buffer;
++    if (attributes) {
++        m_displayBuffers.removeAllMatching([&](auto& existing) {
++            return existing->id() == bufferID;
++        });
++        buffer = DMABufBuffer::create(bufferID, WTF::move(*attributes));
++        m_displayBuffers.append(*buffer);
++        if (m_displayBuffers.size() > renderBufferCount)
++            m_displayBuffers.removeAt(0);
++    } else {
++        for (auto& existing : m_displayBuffers) {
++            if (existing->id() == bufferID)
++                buffer = existing.ptr();
++        }
++    }
++
++    if (!buffer)
++        return;
++
++    OptionSet<TextureMapperFlags> flags;
++    if (!isOpaque())
++        flags.add(TextureMapperFlags::ShouldBlend);
++    Ref<GraphicsLayerContentsDisplayDelegate> delegate = m_layerContentsDisplayDelegate;
++    delegate->setDisplayBuffer(CoordinatedPlatformLayerBufferDMABuf::create(buffer.releaseNonNull(), flags, WTF::move(fence)));
++}
++
++}
++
++#endif
+--- a/Source/WebCore/html/canvas/GPUCanvasContextGBM.h
++++ b/Source/WebCore/html/canvas/GPUCanvasContextGBM.h
+@@ -0,0 +1,62 @@
++#pragma once
++
++#if HAVE(WEBGPU_IMPLEMENTATION) && USE(GBM)
++
++#include "GPUCanvasConfiguration.h"
++#include "GPUCanvasContext.h"
++#include "GPUCompositorIntegration.h"
++#include "GPUPresentationContext.h"
++#include "GPUTexture.h"
++#include <wtf/Ref.h>
++#include <wtf/RefPtr.h>
++#include <wtf/Vector.h>
++
++namespace WebCore {
++
++class DMABufBuffer;
++class Document;
++class GraphicsLayerContentsDisplayDelegateCoordinated;
++
++class GPUCanvasContextGBM final : public GPUCanvasContext {
++    WTF_MAKE_TZONE_ALLOCATED(GPUCanvasContextGBM);
++public:
++    GPUCanvasContextGBM(CanvasBase&, Ref<GPUCompositorIntegration>&&, Ref<GPUPresentationContext>&&);
++    ~GPUCanvasContextGBM();
++
++    bool compositingResultsNeedUpdating() const override { return m_compositingResultsNeedsUpdating; }
++    RefPtr<GraphicsLayerContentsDisplayDelegate> layerContentsDisplayDelegate() override;
++    bool needsPreparationForDisplay() const override { return true; }
++    void prepareForDisplay() override;
++    PixelFormat pixelFormat() const override;
++    bool isOpaque() const override;
++    void didUpdateCanvasSizeProperties(bool) override;
++
++    RefPtr<ImageBuffer> surfaceBufferToImageBuffer(SurfaceBuffer) override { return nullptr; }
++    bool isSurfaceBufferTransparentBlack(SurfaceBuffer) const final { return false; }
++
++    CanvasType canvas() override;
++    ExceptionOr<void> configure(GPUCanvasConfiguration&&) override;
++    void unconfigure() override;
++    std::optional<GPUCanvasConfiguration> getConfiguration() const override;
++    ExceptionOr<Ref<GPUTexture>> getCurrentTexture() override;
++
++private:
++    void markContextChangedAndNotifyCanvasObservers();
++    void setDisplayBuffer(uint64_t bufferID, std::optional<DMABufBufferAttributes>&&, UnixFileDescriptor&&);
++
++    std::optional<GPUCanvasConfiguration> m_configuration;
++    uint32_t m_frameIndex { 0 };
++    GPUIntegerCoordinate m_width { 0 };
++    GPUIntegerCoordinate m_height { 0 };
++    bool m_compositingResultsNeedsUpdating { false };
++
++    const Ref<GraphicsLayerContentsDisplayDelegateCoordinated> m_layerContentsDisplayDelegate;
++    const Ref<GPUCompositorIntegration> m_compositorIntegration;
++    const Ref<GPUPresentationContext> m_presentationContext;
++    RefPtr<GPUTexture> m_currentTexture;
++    Vector<Ref<DMABufBuffer>> m_displayBuffers;
++};
++
++}
++
++#endif
+--- a/Source/WebCore/SourcesWPE.txt
++++ b/Source/WebCore/SourcesWPE.txt
+@@ -119,3 +119,4 @@
+ platform/wpe/PlatformScreenWPE.cpp
+ 
+ platform/xdg/MIMETypeRegistryXdg.cpp
++html/canvas/GPUCanvasContextGBM.cpp
+--- a/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.cpp
++++ b/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.cpp
+@@ -86,6 +86,21 @@
+ }
+ #endif
+ 
++#if USE(GBM)
++void RemoteCompositorIntegration::recreateRenderBuffersDMABuf(int width, int height, WebCore::DestinationColorSpace&& destinationColorSpace, WebCore::AlphaPremultiplication alphaMode, WebCore::WebGPU::TextureFormat textureFormat, unsigned bufferCount, WebKit::WebGPUIdentifier deviceIdentifier, CompletionHandler<void(bool)>&& callback)
++{
++    auto convertedDevice = protect(m_objectHeap)->convertDeviceFromBacking(deviceIdentifier);
++    MESSAGE_CHECK_COMPLETION(convertedDevice, callback(false));
++
++    callback(protect(m_backing)->recreateRenderBuffers(width, height, WTF::move(destinationColorSpace), alphaMode, textureFormat, bufferCount, *convertedDevice));
++}
++
++void RemoteCompositorIntegration::prepareForDisplayDMABuf(uint32_t frameIndex, CompletionHandler<void(uint64_t, std::optional<WebCore::DMABufBufferAttributes>&&, UnixFileDescriptor&&)>&& completionHandler)
++{
++    protect(m_backing)->prepareForDisplay(frameIndex, WTF::move(completionHandler));
++}
++#endif
++
+ void RemoteCompositorIntegration::prepareForDisplay(uint32_t frameIndex, CompletionHandler<void(bool)>&& completionHandler)
+ {
+     protect(m_backing)->prepareForDisplay(frameIndex, [completionHandler = WTF::move(completionHandler)]() mutable {
+--- a/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.h
++++ b/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.h
+@@ -35,6 +35,11 @@
+ #include <WebCore/WebGPUIntegralTypes.h>
+ #include <wtf/Ref.h>
+ #include <wtf/TZoneMalloc.h>
++
++#if USE(GBM)
++#include <WebCore/DMABufBufferAttributes.h>
++#include <wtf/unix/UnixFileDescriptor.h>
++#endif
+ #include <wtf/WeakRef.h>
+ #include <wtf/text/WTFString.h>
+ 
+@@ -99,6 +104,10 @@
+     void recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, WebKit::WebGPUIdentifier deviceIdentifier, CompletionHandler<void(Vector<MachSendRight>&&)>&&);
+ #endif
+ 
++#if USE(GBM)
++    void recreateRenderBuffersDMABuf(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, WebKit::WebGPUIdentifier deviceIdentifier, CompletionHandler<void(bool)>&&);
++    void prepareForDisplayDMABuf(uint32_t frameIndex, CompletionHandler<void(uint64_t, std::optional<WebCore::DMABufBufferAttributes>&&, UnixFileDescriptor&&)>&&);
++#endif
+     void prepareForDisplay(uint32_t frameIndex, CompletionHandler<void(bool)>&&);
+     void updateContentsHeadroom(float);
+ 
+--- a/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.messages.in
++++ b/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.messages.in
+@@ -32,6 +32,10 @@
+ #if PLATFORM(COCOA)
+     void RecreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace destinationColorSpace, enum:uint8_t WebCore::AlphaPremultiplication alphaMode, WebCore::WebGPU::TextureFormat textureFormat, unsigned bufferCount, WebKit::WebGPUIdentifier deviceIdentifier) -> (Vector<MachSendRight> renderBuffers) Synchronous NotStreamEncodableReply
+ #endif
++#if USE(GBM)
++    void RecreateRenderBuffersDMABuf(int width, int height, WebCore::DestinationColorSpace destinationColorSpace, enum:uint8_t WebCore::AlphaPremultiplication alphaMode, WebCore::WebGPU::TextureFormat textureFormat, unsigned bufferCount, WebKit::WebGPUIdentifier deviceIdentifier) -> (bool success) Synchronous NotStreamEncodableReply
++    void PrepareForDisplayDMABuf(uint32_t frameIndex) -> (uint64_t bufferID, std::optional<WebCore::DMABufBufferAttributes> dmabufAttributes, UnixFileDescriptor fenceFD) Synchronous NotStreamEncodableReply
++#endif
+     void PrepareForDisplay(uint32_t frameIndex) -> (bool dummy) Synchronous NotStreamEncodableReply // Because CanvasRenderingContext::prepareForDisplay() requires the layer contents synchronously, this needs to be Synchronous.
+     void PaintCompositedResultsToCanvas(WebCore::RenderingResourceIdentifier imageBuffer, uint32_t bufferIndex) -> () Synchronous
+     void Destruct()
+--- a/Source/WebKit/WebProcess/GPU/graphics/WebGPU/RemoteCompositorIntegrationProxy.cpp
++++ b/Source/WebKit/WebProcess/GPU/graphics/WebGPU/RemoteCompositorIntegrationProxy.cpp
+@@ -66,6 +66,30 @@
+ }
+ #endif
+ 
++#if USE(GBM)
++bool RemoteCompositorIntegrationProxy::recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&& destinationColorSpace, WebCore::AlphaPremultiplication alphaMode, WebCore::WebGPU::TextureFormat textureFormat, unsigned bufferCount, WebCore::WebGPU::Device& device)
++{
++    RemoteDeviceProxy& proxyDevice = downcast<RemoteDeviceProxy>(device);
++    auto sendResult = sendSync(Messages::RemoteCompositorIntegration::RecreateRenderBuffersDMABuf(width, height, WTF::move(destinationColorSpace), alphaMode, textureFormat, bufferCount, proxyDevice.backing()));
++    if (!sendResult.succeeded())
++        return false;
++
++    auto [success] = sendResult.takeReply();
++    return success;
++}
++
++void RemoteCompositorIntegrationProxy::prepareForDisplay(uint32_t frameIndex, DisplayBufferHandler&& completionHandler)
++{
++    auto sendResult = sendSync(Messages::RemoteCompositorIntegration::PrepareForDisplayDMABuf(frameIndex));
++    protect(m_presentationContext)->present(frameIndex);
++    if (!sendResult.succeeded())
++        return completionHandler(0, std::nullopt, { });
++
++    auto [bufferID, attributes, fence] = sendResult.takeReply();
++    completionHandler(bufferID, WTF::move(attributes), WTF::move(fence));
++}
++#endif
++
+ void RemoteCompositorIntegrationProxy::prepareForDisplay(uint32_t frameIndex, CompletionHandler<void()>&& completionHandler)
+ {
+     auto sendResult = sendSync(Messages::RemoteCompositorIntegration::PrepareForDisplay(frameIndex));
+--- a/Source/WebKit/WebProcess/GPU/graphics/WebGPU/RemoteCompositorIntegrationProxy.h
++++ b/Source/WebKit/WebProcess/GPU/graphics/WebGPU/RemoteCompositorIntegrationProxy.h
+@@ -33,6 +33,11 @@
+ #include <WebCore/WebGPUCompositorIntegration.h>
+ #include <wtf/TZoneMalloc.h>
+ 
++#if USE(GBM)
++#include <WebCore/DMABufBufferAttributes.h>
++#include <wtf/unix/UnixFileDescriptor.h>
++#endif
++
+ namespace WebCore {
+ class ImageBuffer;
+ class NativeImage;
+@@ -96,6 +101,10 @@
+     Vector<MachSendRight> recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, WebCore::WebGPU::Device&) override;
+ #endif
+ 
++#if USE(GBM)
++    bool recreateRenderBuffers(int width, int height, WebCore::DestinationColorSpace&&, WebCore::AlphaPremultiplication, WebCore::WebGPU::TextureFormat, unsigned bufferCount, WebCore::WebGPU::Device&) override;
++    void prepareForDisplay(uint32_t frameIndex, DisplayBufferHandler&&) override;
++#endif
+     void prepareForDisplay(uint32_t frameIndex, CompletionHandler<void()>&&) override;
+     void updateContentsHeadroom(float) override;
+ 

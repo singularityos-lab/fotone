@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pin = @embedFile("upstream/wpewebkit");
+const dawn_pin = @embedFile("upstream/dawn");
 
 const engine_flags = [_][]const u8{
     "-DPORT=WPE",
@@ -26,12 +27,46 @@ const engine_flags = [_][]const u8{
     "-DUSE_LIBRICE=OFF",
     "-DENABLE_ENCRYPTED_MEDIA=ON",
     "-DENABLE_THUNDER=ON",
+    "-DENABLE_WEB_AUTHN=ON",
+    "-DENABLE_WEBGPU=ON",
     "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-Bsymbolic-functions",
 };
 
+const dawn_flags = [_][]const u8{
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DCMAKE_C_COMPILER=clang",
+    "-DCMAKE_CXX_COMPILER=clang++",
+    "-DDAWN_BUILD_MONOLITHIC_LIBRARY=SHARED",
+    "-DDAWN_ENABLE_INSTALL=ON",
+    "-DDAWN_ENABLE_VULKAN=ON",
+    "-DDAWN_ENABLE_NULL=ON",
+    "-DDAWN_ENABLE_DESKTOP_GL=OFF",
+    "-DDAWN_ENABLE_OPENGLES=OFF",
+    "-DDAWN_USE_X11=OFF",
+    "-DDAWN_USE_WAYLAND=OFF",
+    "-DDAWN_USE_GLFW=OFF",
+    "-DDAWN_BUILD_SAMPLES=OFF",
+    "-DDAWN_BUILD_TESTS=OFF",
+    "-DDAWN_BUILD_BENCHMARKS=OFF",
+    "-DDAWN_BUILD_PROTOBUF=OFF",
+    "-DDAWN_FETCH_DEPENDENCIES=OFF",
+    "-DTINT_BUILD_TESTS=OFF",
+    "-DTINT_BUILD_CMD_TOOLS=OFF",
+    "-DTINT_BUILD_SPV_READER=OFF",
+    "-DTINT_BUILD_GLSL_WRITER=OFF",
+    "-DTINT_BUILD_GLSL_VALIDATOR=OFF",
+    "-DTINT_BUILD_HLSL_WRITER=OFF",
+    "-DTINT_BUILD_IR_BINARY=OFF",
+    "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-Bsymbolic",
+};
+
 fn pinValue(comptime key: []const u8) []const u8 {
+    return pinOf(pin, key);
+}
+
+fn pinOf(comptime text: []const u8, comptime key: []const u8) []const u8 {
     @setEvalBranchQuota(100000);
-    var it = std.mem.tokenizeScalar(u8, pin, '\n');
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
         if (std.mem.startsWith(u8, line, key ++ " ")) return line[key.len + 1 ..];
     }
@@ -97,6 +132,37 @@ pub fn build(b: *std.Build) void {
     const src = b.option([]const u8, "upstream-src", "unpacked WPE WebKit tree") orelse b.pathFromRoot(b.fmt("upstream/src/wpewebkit-{s}", .{version}));
     const out = b.option([]const u8, "upstream-build", "WPE WebKit build directory") orelse b.pathFromRoot("upstream/build");
     const jobs = b.option(u32, "jobs", "parallel engine compile jobs") orelse 2;
+    const dawn_src = b.option([]const u8, "dawn-src", "Dawn checkout") orelse b.pathFromRoot("upstream/src/dawn");
+    const dawn_out = b.option([]const u8, "dawn-build", "Dawn build directory") orelse b.pathFromRoot("upstream/dawn-build");
+
+    const dawn_fetch = b.addSystemCommand(&.{ "sh", "-ec",
+        \\[ -d "$1/.git" ] && exit 0
+        \\git init -q "$1"
+        \\git -C "$1" fetch -q --depth 1 "$2" "$3"
+        \\git -C "$1" checkout -q FETCH_HEAD
+        \\cd "$1" && python3 tools/fetch_dawn_dependencies.py -s
+    , "dawn-fetch", dawn_src, comptime pinOf(dawn_pin, "url"), comptime pinOf(dawn_pin, "commit") });
+    const dawn_configure = b.addSystemCommand(&.{ "cmake", "-G", "Ninja", "-S", dawn_src, "-B", dawn_out });
+    dawn_configure.addArgs(&dawn_flags);
+    dawn_configure.step.dependOn(&dawn_fetch.step);
+    const dawn_compile = b.addSystemCommand(&.{ "ninja", "-C", dawn_out, b.fmt("-j{d}", .{jobs}) });
+    dawn_compile.step.dependOn(&dawn_configure.step);
+    const dawn_stage = b.addSystemCommand(&.{ "cmake", "--install", dawn_out });
+    dawn_stage.setEnvironmentVariable("DESTDIR", b.pathJoin(&.{ out, "stage" }));
+    dawn_stage.step.dependOn(&dawn_compile.step);
+    b.step("dawn", "fetch and build Dawn for WebGPU").dependOn(&dawn_stage.step);
+
+    const lower = b.addRunArtifact(b.addExecutable(.{
+        .name = "fotone-lower",
+        .root_module = b.createModule(.{ .root_source_file = b.path("webgpu/lower.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true }),
+    }));
+    const lowered = lower.addOutputFileArg("webkit_webgpu.h");
+    lower.addFileArg(.{ .cwd_relative = b.pathJoin(&.{ src, "Source", "WebGPU", "WebGPU", "WebGPU.h" }) });
+    lower.addFileArg(.{ .cwd_relative = b.pathJoin(&.{ src, "Source", "WebGPU", "WebGPU", "WebGPUExt.h" }) });
+
+    const webgpu_mod = b.createModule(.{ .root_source_file = b.path("webgpu/webgpu.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true });
+    webgpu_mod.addIncludePath(lowered.dirname());
+    webgpu_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ dawn_out, "gen", "include" }) });
 
     const fetch = b.addSystemCommand(&.{ "sh", "-ec",
         \\[ -d "$1" ] && exit 0
@@ -111,8 +177,10 @@ pub fn build(b: *std.Build) void {
     const hooks = b.addLibrary(.{
         .name = "fotone-hooks",
         .linkage = .static,
-        .root_module = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true }),
+        .root_module = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true }),
     });
+    hooks.root_module.addImport("webgpu", webgpu_mod);
+    hooks.step.dependOn(&dawn_compile.step);
 
     const ocdm_mod = b.createModule(.{ .root_source_file = b.path("ocdm/ocdm.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
     ocdm_mod.addIncludePath(b.path("ocdm"));
@@ -271,6 +339,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(wt).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hooks.root_module })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = webgpu_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bump_mod, .use_llvm = true })).step);
 }

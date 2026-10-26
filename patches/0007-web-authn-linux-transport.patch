@@ -1,0 +1,832 @@
+--- a/Source/WebCore/CMakeLists.txt
++++ b/Source/WebCore/CMakeLists.txt
+@@ -74,6 +74,7 @@
+     "${WEBCORE_DIR}/Modules/web-locks"
+     "${WEBCORE_DIR}/Modules/webaudio"
+     "${WEBCORE_DIR}/Modules/webauthn"
++    "${WEBCORE_DIR}/Modules/webauthn/apdu"
+     "${WEBCORE_DIR}/Modules/webauthn/cbor"
+     "${WEBCORE_DIR}/Modules/webauthn/fido"
+     "${WEBCORE_DIR}/Modules/webcodecs"
+--- a/Source/WebCore/crypto/CommonCryptoDERUtilities.h
++++ b/Source/WebCore/crypto/CommonCryptoDERUtilities.h
+@@ -0,0 +1,17 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace WebCore {
++
++static constexpr uint8_t SequenceMark = 0x30;
++
++inline size_t bytesUsedToEncodedLength(uint8_t octet)
++{
++    if (octet < 0x80)
++        return 1;
++    return 1 + (octet & 0x7f);
++}
++
++}
+--- a/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.h
++++ b/Source/WebCore/Modules/webauthn/AuthenticatorAssertionResponse.h
+@@ -29,10 +29,15 @@
+ 
+ #include <WebCore/AuthenticationResponseJSON.h>
+ #include <WebCore/AuthenticatorResponse.h>
++#if PLATFORM(COCOA)
+ #include <wtf/RetainPtr.h>
+ #include <wtf/spi/cocoa/SecuritySPI.h>
+ 
+ OBJC_CLASS LAContext;
++#else
++typedef const struct __SecAccessControl* SecAccessControlRef;
++class LAContext;
++#endif
+ 
+ namespace WebCore {
+ 
+@@ -50,10 +55,18 @@
+     const String& name() const LIFETIME_BOUND { return m_name; }
+     const String& displayName() const LIFETIME_BOUND { return m_displayName; }
+     size_t numberOfCredentials() const { return m_numberOfCredentials; }
++#if PLATFORM(COCOA)
+     SecAccessControlRef accessControl() const { return m_accessControl.get(); }
++#else
++    SecAccessControlRef accessControl() const { return m_accessControl; }
++#endif
+     const String& group() const LIFETIME_BOUND { return m_group; }
+     bool synchronizable() const { return m_synchronizable; }
++#if PLATFORM(COCOA)
+     LAContext * laContext() const { return m_laContext.get(); }
++#else
++    LAContext * laContext() const { return m_laContext; }
++#endif
+     RefPtr<ArrayBuffer> largeBlob() const { return m_largeBlob; }
+     const String& accessGroup() const LIFETIME_BOUND { return m_accessGroup; }
+ 
+@@ -86,8 +99,13 @@
+     String m_group;
+     bool m_synchronizable { false };
+     size_t m_numberOfCredentials { 0 };
++#if PLATFORM(COCOA)
+     const RetainPtr<SecAccessControlRef> m_accessControl;
+     RetainPtr<LAContext> m_laContext;
++#else
++    const SecAccessControlRef m_accessControl { nullptr };
++    LAContext* m_laContext { nullptr };
++#endif
+     RefPtr<ArrayBuffer> m_largeBlob;
+     String m_accessGroup;
+ };
+--- a/Source/WebCore/platform/LocalizedStrings.cpp
++++ b/Source/WebCore/platform/LocalizedStrings.cpp
+@@ -1599,6 +1599,7 @@
+ #if ENABLE(WEB_AUTHN)
+ // On macOS, Touch ID prompt is not guaranteed to show on top of the UI client, and therefore additional
+ // information is provided to help users to make decisions.
++#if PLATFORM(COCOA)
+ String makeCredentialTouchIDPromptTitle(const String& bundleName, const String& domain)
+ {
+     return WEB_UI_FORMAT_CFSTRING("“%@” would like to use Touch ID for “%@”.", "Allow the specified bundle to use Touch ID to sign in to the specified website on this device", bundleName.createCFString().get(), domain.createCFString().get());
+@@ -1608,6 +1609,7 @@
+ {
+     return WEB_UI_FORMAT_CFSTRING("“%@” would like to sign in to “%@”.", "Allow the specified bundle to sign in to the specified website", bundleName.createCFString().get(), domain.createCFString().get());
+ }
++#endif
+ 
+ String genericTouchIDPromptTitle()
+ {
+--- a/Source/WebKit/PlatformWPE.cmake
++++ b/Source/WebKit/PlatformWPE.cmake
+@@ -828,3 +828,23 @@
+ if (FOTONE_HOOKS)
+     list(APPEND WebKit_PRIVATE_LIBRARIES -Wl,--whole-archive ${FOTONE_HOOKS} -Wl,--no-whole-archive)
+ endif ()
++
++if (ENABLE_WEB_AUTHN)
++    list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
++        "${WEBKIT_DIR}/UIProcess/WebAuthentication/fido"
++        "${WEBKIT_DIR}/UIProcess/WebAuthentication/sinty"
++        "${WEBKIT_DIR}/WebProcess/WebAuthentication"
++    )
++    list(APPEND WebKit_SOURCES
++        UIProcess/WebAuthentication/AuthenticatorManager.cpp
++        UIProcess/WebAuthentication/fido/CtapAuthenticator.cpp
++        UIProcess/WebAuthentication/fido/CtapCcidDriver.cpp
++        UIProcess/WebAuthentication/fido/CtapHidDriver.cpp
++        UIProcess/WebAuthentication/sinty/HidConnection.cpp
++        UIProcess/WebAuthentication/sinty/HidService.cpp
++        UIProcess/WebAuthentication/sinty/SintyAuthenticationPanelClient.cpp
++    )
++    list(APPEND WebKit_MESSAGES_IN_FILES
++        UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy
++    )
++endif ()
+--- a/Source/WebKit/UIProcess/API/glib/WebKitUIClient.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitUIClient.cpp
+@@ -46,6 +46,10 @@
+ #include <wtf/glib/GWeakPtr.h>
+ #include <wtf/glib/RunLoopSourcePriority.h>
+ 
++#if ENABLE(WEB_AUTHN)
++#include "SintyAuthenticationPanelClient.h"
++#endif
++
+ #if PLATFORM(GTK)
+ #include "Display.h"
+ #include "GtkUtilities.h"
+@@ -103,6 +107,14 @@
+         webkitWebViewRunJavaScriptPrompt(m_webView, message.utf8(), defaultValue.utf8(), WTF::move(completionHandler));
+     }
+ 
++#if ENABLE(WEB_AUTHN) && PLATFORM(WPE)
++    void runWebAuthenticationPanel(WebPageProxy&, API::WebAuthenticationPanel& panel, WebFrameProxy&, WebKit::FrameInfoData&&, CompletionHandler<void(WebAuthenticationPanelResult)>&& completionHandler) final
++    {
++        panel.setClient(SintyAuthenticationPanelClient::create(m_webView, panel));
++        completionHandler(WebAuthenticationPanelResult::Presented);
++    }
++#endif
++
+     bool canRunBeforeUnloadConfirmPanel() const final { return true; }
+ 
+     void runBeforeUnloadConfirmPanel(WebPageProxy&, String&& message, WebFrameProxy*, WebKit::FrameInfoData&&, Function<void(bool)>&& completionHandler) final
+--- a/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/AuthenticatorTransportService.cpp
+@@ -31,10 +31,12 @@
+ #include "CcidService.h"
+ #include "HidService.h"
+ #include "LocalService.h"
+-#include "MockCcidService.h"
+ #include "MockHidService.h"
++#if PLATFORM(COCOA)
++#include "MockCcidService.h"
+ #include "MockLocalService.h"
+ #include "MockNfcService.h"
++#endif
+ #include "NfcService.h"
+ #include <wtf/RunLoop.h>
+ #include <wtf/TZoneMallocInlines.h>
+@@ -62,6 +64,7 @@
+ 
+ Ref<AuthenticatorTransportService> AuthenticatorTransportService::createMock(WebCore::AuthenticatorTransport transport, AuthenticatorTransportServiceObserver& observer, const WebCore::MockWebAuthenticationConfiguration& configuration)
+ {
++#if PLATFORM(COCOA)
+     switch (transport) {
+     case WebCore::AuthenticatorTransport::Internal:
+         return MockLocalService::create(observer, configuration);
+@@ -75,6 +78,11 @@
+         ASSERT_NOT_REACHED();
+         return MockLocalService::create(observer, configuration);
+     }
++#else
++    if (transport == WebCore::AuthenticatorTransport::Usb)
++        return MockHidService::create(observer, configuration);
++    return create(transport, observer);
++#endif
+ }
+ 
+ AuthenticatorTransportService::AuthenticatorTransportService(AuthenticatorTransportServiceObserver& observer)
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/AuthenticatorPresenterCoordinator.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/AuthenticatorPresenterCoordinator.h
+@@ -0,0 +1,26 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include "WebAuthenticationFlags.h"
++#include <wtf/RefCounted.h>
++#include <wtf/RefPtr.h>
++#include <wtf/text/WTFString.h>
++
++namespace WebKit {
++
++class AuthenticatorPresenterCoordinator : public RefCounted<AuthenticatorPresenterCoordinator> {
++public:
++    template<typename... Arguments> static RefPtr<AuthenticatorPresenterCoordinator> create(Arguments&&...) { return nullptr; }
++
++    void updatePresenter(WebAuthenticationStatus) { }
++    void dimissPresenter(WebAuthenticationResult) { }
++    template<typename Callback> void requestPin(uint64_t, Callback&& callback) { callback(String()); }
++    template<typename Callback> void requestNewPin(uint64_t, Callback&& callback) { callback(String()); }
++    template<typename Responses, typename Callback> void selectAssertionResponse(Responses&&, WebAuthenticationSource, Callback&& callback) { callback(nullptr); }
++    template<typename Callback> void requestLAContextForUserVerification(Callback&& callback) { callback(nullptr); }
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/CcidConnection.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/CcidConnection.h
+@@ -0,0 +1,18 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include <wtf/CompletionHandler.h>
++#include <wtf/RefCountedAndCanMakeWeakPtr.h>
++#include <wtf/Vector.h>
++
++namespace WebKit {
++
++class CcidConnection final : public RefCountedAndCanMakeWeakPtr<CcidConnection> {
++public:
++    void transact(Vector<uint8_t>&&, CompletionHandler<void(Vector<uint8_t>&&)>&& callback) const { callback({ }); }
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/CcidService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/CcidService.h
+@@ -0,0 +1,29 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include "AuthenticatorTransportService.h"
++#include <wtf/RefCounted.h>
++
++namespace WebKit {
++
++class CcidService final : public AuthenticatorTransportService, public RefCounted<CcidService> {
++public:
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++
++    static Ref<CcidService> create(AuthenticatorTransportServiceObserver& observer) { return adoptRef(*new CcidService(observer)); }
++    static bool isAvailable() { return false; }
++
++private:
++    explicit CcidService(AuthenticatorTransportServiceObserver& observer)
++        : AuthenticatorTransportService(observer)
++    {
++    }
++
++    void startDiscoveryInternal() final { }
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/HidConnection.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/HidConnection.cpp
+@@ -0,0 +1,132 @@
++#include "config.h"
++#include "HidConnection.h"
++
++#if ENABLE(WEB_AUTHN)
++
++#include <WebCore/FidoConstants.h>
++#include <array>
++#include <glib-unix.h>
++#include <wtf/RunLoop.h>
++
++extern "C" {
++__attribute__((weak)) int fotone_hid_open(const char*);
++__attribute__((weak)) void fotone_hid_close(int);
++__attribute__((weak)) int fotone_hid_write(int, const uint8_t*, size_t);
++__attribute__((weak)) ssize_t fotone_hid_read(int, uint8_t*, size_t);
++}
++
++namespace WebKit {
++using namespace fido;
++
++Ref<HidConnection> HidConnection::create(IOHIDDeviceRef device)
++{
++    return adoptRef(*new HidConnection(device));
++}
++
++HidConnection::HidConnection(IOHIDDeviceRef device)
++    : m_path(device ? device->path : CString())
++{
++}
++
++HidConnection::~HidConnection()
++{
++    if (m_source)
++        g_source_destroy(m_source.get());
++    if (m_fd >= 0 && fotone_hid_close)
++        fotone_hid_close(m_fd);
++}
++
++void HidConnection::initialize()
++{
++    if (fotone_hid_open && !m_path.isNull())
++        m_fd = fotone_hid_open(m_path.data());
++    if (m_fd >= 0) {
++        m_source = adoptGRef(g_unix_fd_source_new(m_fd, static_cast<GIOCondition>(G_IO_IN | G_IO_ERR | G_IO_HUP)));
++        g_source_set_callback(m_source.get(), reinterpret_cast<GSourceFunc>(+[](int, GIOCondition condition, gpointer data) -> gboolean {
++            Ref connection = *static_cast<HidConnection*>(data);
++            if (condition & (G_IO_ERR | G_IO_HUP)) {
++                connection->m_source = nullptr;
++                connection->receiveReport({ });
++                return G_SOURCE_REMOVE;
++            }
++            connection->readReports();
++            return G_SOURCE_CONTINUE;
++        }), this, nullptr);
++        g_source_attach(m_source.get(), RunLoop::mainSingleton().mainContext());
++    }
++    m_isInitialized = true;
++}
++
++void HidConnection::terminate()
++{
++    if (m_source) {
++        g_source_destroy(m_source.get());
++        m_source = nullptr;
++    }
++    if (m_fd >= 0 && fotone_hid_close)
++        fotone_hid_close(m_fd);
++    m_fd = -1;
++    m_isInitialized = false;
++}
++
++void HidConnection::readReports()
++{
++    std::array<uint8_t, kHidMaxPacketSize> report;
++    while (m_fd >= 0) {
++        auto length = fotone_hid_read(m_fd, report.data(), report.size());
++        if (length <= 0)
++            return;
++        receiveReport(Vector<uint8_t> { std::span { report }.first(static_cast<size_t>(length)) });
++    }
++}
++
++auto HidConnection::sendSync(const Vector<uint8_t>& data) -> DataSent
++{
++    ASSERT(m_isInitialized);
++    if (m_fd < 0 || !fotone_hid_write)
++        return DataSent::No;
++    return fotone_hid_write(m_fd, data.span().data(), data.size()) ? DataSent::Yes : DataSent::No;
++}
++
++void HidConnection::send(Vector<uint8_t>&& data, DataSentCallback&& callback)
++{
++    ASSERT(m_isInitialized);
++    auto sent = sendSync(data);
++    RunLoop::mainSingleton().dispatch([callback = WTF::move(callback), sent]() mutable {
++        callback(sent);
++    });
++}
++
++void HidConnection::registerDataReceivedCallback(DataReceivedCallback&& callback)
++{
++    ASSERT(m_isInitialized);
++    ASSERT(!m_inputCallback);
++    m_inputCallback = WTF::move(callback);
++    consumeReports();
++    registerDataReceivedCallbackInternal();
++}
++
++void HidConnection::unregisterDataReceivedCallback()
++{
++    m_inputCallback = nullptr;
++}
++
++void HidConnection::receiveReport(Vector<uint8_t>&& report)
++{
++    m_inputReports.append(WTF::move(report));
++    consumeReports();
++}
++
++void HidConnection::consumeReports()
++{
++    while (!m_inputReports.isEmpty() && m_inputCallback)
++        m_inputCallback(m_inputReports.takeFirst());
++}
++
++void HidConnection::registerDataReceivedCallbackInternal()
++{
++}
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/HidConnection.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/HidConnection.h
+@@ -0,0 +1,63 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include <wtf/CompletionHandler.h>
++#include <wtf/Deque.h>
++#include <wtf/Forward.h>
++#include <wtf/Function.h>
++#include <wtf/Noncopyable.h>
++#include <wtf/RefCountedAndCanMakeWeakPtr.h>
++#include <wtf/glib/GRefPtr.h>
++#include <wtf/text/CString.h>
++
++struct FotoneHidDevice {
++    CString path;
++};
++using IOHIDDeviceRef = FotoneHidDevice*;
++
++namespace WebKit {
++
++class HidConnection : public RefCountedAndCanMakeWeakPtr<HidConnection> {
++    WTF_MAKE_NONCOPYABLE(HidConnection);
++public:
++    enum class DataSent : bool { No, Yes };
++
++    using DataSentCallback = CompletionHandler<void(DataSent)>;
++    using DataReceivedCallback = Function<void(Vector<uint8_t>&&)>;
++
++    static Ref<HidConnection> create(IOHIDDeviceRef);
++    virtual ~HidConnection();
++
++    virtual void initialize();
++    virtual void terminate();
++    virtual DataSent sendSync(const Vector<uint8_t>& data);
++    virtual void send(Vector<uint8_t>&& data, DataSentCallback&&);
++    void registerDataReceivedCallback(DataReceivedCallback&&);
++    void unregisterDataReceivedCallback();
++    void invalidateCache() { m_inputReports.clear(); }
++
++    void receiveReport(Vector<uint8_t>&&);
++
++protected:
++    explicit HidConnection(IOHIDDeviceRef);
++    bool isInitialized() const { return m_isInitialized; }
++    void setIsInitialized(bool isInitialized) { m_isInitialized = isInitialized; }
++
++private:
++    void consumeReports();
++    void readReports();
++
++    virtual void registerDataReceivedCallbackInternal();
++
++    CString m_path;
++    int m_fd { -1 };
++    GRefPtr<GSource> m_source;
++    Deque<Vector<uint8_t>> m_inputReports;
++    DataReceivedCallback m_inputCallback;
++    bool m_isInitialized { false };
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/HidService.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/HidService.cpp
+@@ -0,0 +1,67 @@
++#include "config.h"
++#include "HidService.h"
++
++#if ENABLE(WEB_AUTHN)
++
++#include "CtapHidDriver.h"
++
++extern "C" {
++__attribute__((weak)) int fotone_hid_scan(void (*)(void*, const char*), void*);
++}
++
++namespace WebKit {
++
++Ref<HidService> HidService::create(AuthenticatorTransportServiceObserver& observer)
++{
++    return adoptRef(*new HidService(observer));
++}
++
++HidService::HidService(AuthenticatorTransportServiceObserver& observer)
++    : FidoService(observer)
++    , m_scanTimer(RunLoop::mainSingleton(), "HidService::ScanTimer"_s, this, &HidService::scan)
++{
++}
++
++HidService::~HidService() = default;
++
++void HidService::startDiscoveryInternal()
++{
++    platformStartDiscovery();
++}
++
++void HidService::platformStartDiscovery()
++{
++    scan();
++    m_scanTimer.startRepeating(1_s);
++}
++
++void HidService::scan()
++{
++    if (!fotone_hid_scan)
++        return;
++    HashSet<String> found;
++    fotone_hid_scan([](void* data, const char* path) {
++        static_cast<HashSet<String>*>(data)->add(String::fromUTF8(path));
++    }, &found);
++    for (auto& path : found) {
++        if (m_present.contains(path))
++            continue;
++        FotoneHidDevice device { path.utf8() };
++        deviceAdded(&device);
++    }
++    m_present = WTF::move(found);
++}
++
++Ref<HidConnection> HidService::createHidConnection(IOHIDDeviceRef device) const
++{
++    return HidConnection::create(device);
++}
++
++void HidService::deviceAdded(IOHIDDeviceRef device)
++{
++    getInfo(CtapHidDriver::create(createHidConnection(device)));
++}
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/HidService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/HidService.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include "FidoService.h"
++#include "HidConnection.h"
++#include <wtf/HashSet.h>
++#include <wtf/RunLoop.h>
++#include <wtf/text/StringHash.h>
++
++namespace WebKit {
++
++class HidService : public FidoService {
++public:
++    static Ref<HidService> create(AuthenticatorTransportServiceObserver&);
++    ~HidService();
++
++    void deviceAdded(IOHIDDeviceRef);
++
++protected:
++    explicit HidService(AuthenticatorTransportServiceObserver&);
++
++private:
++    void startDiscoveryInternal() final;
++    void scan();
++
++    virtual void platformStartDiscovery();
++    virtual Ref<HidConnection> createHidConnection(IOHIDDeviceRef) const;
++
++    RunLoop::Timer m_scanTimer;
++    HashSet<String> m_present;
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/LocalService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/LocalService.h
+@@ -0,0 +1,29 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include "AuthenticatorTransportService.h"
++#include <wtf/RefCounted.h>
++
++namespace WebKit {
++
++class LocalService final : public AuthenticatorTransportService, public RefCounted<LocalService> {
++public:
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++
++    static Ref<LocalService> create(AuthenticatorTransportServiceObserver& observer) { return adoptRef(*new LocalService(observer)); }
++    static bool isAvailable() { return false; }
++
++private:
++    explicit LocalService(AuthenticatorTransportServiceObserver& observer)
++        : AuthenticatorTransportService(observer)
++    {
++    }
++
++    void startDiscoveryInternal() final { }
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/NfcConnection.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/NfcConnection.h
+@@ -0,0 +1,17 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include <wtf/RefCountedAndCanMakeWeakPtr.h>
++#include <wtf/Vector.h>
++
++namespace WebKit {
++
++class NfcConnection final : public RefCountedAndCanMakeWeakPtr<NfcConnection> {
++public:
++    Vector<uint8_t> transact(Vector<uint8_t>&&) const { return { }; }
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/NfcService.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/NfcService.h
+@@ -0,0 +1,29 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include "AuthenticatorTransportService.h"
++#include <wtf/RefCounted.h>
++
++namespace WebKit {
++
++class NfcService final : public AuthenticatorTransportService, public RefCounted<NfcService> {
++public:
++    void ref() const final { RefCounted::ref(); }
++    void deref() const final { RefCounted::deref(); }
++
++    static Ref<NfcService> create(AuthenticatorTransportServiceObserver& observer) { return adoptRef(*new NfcService(observer)); }
++    static bool isAvailable() { return false; }
++
++private:
++    explicit NfcService(AuthenticatorTransportServiceObserver& observer)
++        : AuthenticatorTransportService(observer)
++    {
++    }
++
++    void startDiscoveryInternal() final { }
++};
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/SintyAuthenticationPanelClient.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/SintyAuthenticationPanelClient.cpp
+@@ -0,0 +1,124 @@
++#include "config.h"
++#include "SintyAuthenticationPanelClient.h"
++
++#if ENABLE(WEB_AUTHN)
++
++#include <WebCore/AuthenticatorAssertionResponse.h>
++#include <WebCore/WebAuthenticationConstants.h>
++#include <dlfcn.h>
++#include <wtf/text/CString.h>
++
++namespace WebKit {
++
++using CancelFunction = void (*)(void*);
++using PinFunction = void (*)(void*, const char*);
++using IndexFunction = void (*)(void*, int);
++using BeginHook = void (*)(WebKitWebView*, const char* rpId, int isRegistration, CancelFunction, void*);
++using UpdateHook = void (*)(WebKitWebView*, int status);
++using EndHook = void (*)(WebKitWebView*, int succeeded);
++using PinHook = void (*)(WebKitWebView*, uint64_t retries, int isNew, uint64_t minLength, PinFunction, void*);
++using SelectHook = void (*)(WebKitWebView*, const char* const* names, size_t count, IndexFunction, void*);
++
++template<typename T> static T hook(const char* name)
++{
++    return reinterpret_cast<T>(dlsym(RTLD_DEFAULT, name));
++}
++
++Ref<SintyAuthenticationPanelClient> SintyAuthenticationPanelClient::create(WebKitWebView* webView, API::WebAuthenticationPanel& panel)
++{
++    return adoptRef(*new SintyAuthenticationPanelClient(webView, panel));
++}
++
++SintyAuthenticationPanelClient::SintyAuthenticationPanelClient(WebKitWebView* webView, API::WebAuthenticationPanel& panel)
++    : m_webView(webView)
++    , m_panel(panel)
++{
++    auto begin = hook<BeginHook>("fotone_authenticator_begin");
++    if (!begin)
++        return;
++    begin(m_webView, panel.rpId().utf8().data(), panel.clientDataType() == WebCore::ClientDataType::Create, [](void* data) {
++        auto* client = static_cast<SintyAuthenticationPanelClient*>(data);
++        if (client->m_ended)
++            return;
++        if (RefPtr panel = client->m_panel.get())
++            panel->cancel();
++    }, this);
++}
++
++SintyAuthenticationPanelClient::~SintyAuthenticationPanelClient()
++{
++    end(false);
++}
++
++void SintyAuthenticationPanelClient::end(bool succeeded) const
++{
++    if (m_ended)
++        return;
++    m_ended = true;
++    if (auto end = hook<EndHook>("fotone_authenticator_end"))
++        end(m_webView, succeeded);
++}
++
++void SintyAuthenticationPanelClient::updatePanel(WebAuthenticationStatus status) const
++{
++    if (auto update = hook<UpdateHook>("fotone_authenticator_update"))
++        update(m_webView, static_cast<int>(status));
++}
++
++void SintyAuthenticationPanelClient::dismissPanel(WebAuthenticationResult result) const
++{
++    end(result == WebAuthenticationResult::Succeeded);
++}
++
++void SintyAuthenticationPanelClient::askPin(uint64_t retries, bool isNew, uint64_t minLength, CompletionHandler<void(const WTF::String&)>&& completionHandler) const
++{
++    auto ask = hook<PinHook>("fotone_authenticator_pin");
++    if (!ask) {
++        completionHandler(WTF::String());
++        return;
++    }
++    auto* pending = new CompletionHandler<void(const WTF::String&)>(WTF::move(completionHandler));
++    ask(m_webView, retries, isNew, minLength, [](void* data, const char* pin) {
++        std::unique_ptr<CompletionHandler<void(const WTF::String&)>> handler(static_cast<CompletionHandler<void(const WTF::String&)>*>(data));
++        (*handler)(pin ? WTF::String::fromUTF8(pin) : WTF::String());
++    }, pending);
++}
++
++void SintyAuthenticationPanelClient::requestPin(uint64_t retries, CompletionHandler<void(const WTF::String&)>&& completionHandler) const
++{
++    askPin(retries, false, 0, WTF::move(completionHandler));
++}
++
++void SintyAuthenticationPanelClient::requestNewPin(uint64_t minLength, CompletionHandler<void(const WTF::String&)>&& completionHandler) const
++{
++    askPin(0, true, minLength, WTF::move(completionHandler));
++}
++
++void SintyAuthenticationPanelClient::selectAssertionResponse(Vector<Ref<WebCore::AuthenticatorAssertionResponse>>&& responses, WebAuthenticationSource, CompletionHandler<void(WebCore::AuthenticatorAssertionResponse*)>&& completionHandler) const
++{
++    auto select = hook<SelectHook>("fotone_authenticator_select");
++    if (!select || responses.size() == 1) {
++        completionHandler(responses.isEmpty() ? nullptr : responses[0].ptr());
++        return;
++    }
++    struct Pending {
++        Vector<Ref<WebCore::AuthenticatorAssertionResponse>> responses;
++        CompletionHandler<void(WebCore::AuthenticatorAssertionResponse*)> handler;
++    };
++    Vector<CString> labels;
++    for (auto& response : responses)
++        labels.append((response->displayName().isEmpty() ? response->name() : response->displayName()).utf8());
++    Vector<const char*> names;
++    for (auto& label : labels)
++        names.append(label.data());
++    auto* pending = new Pending { WTF::move(responses), WTF::move(completionHandler) };
++    select(m_webView, names.span().data(), names.size(), [](void* data, int index) {
++        std::unique_ptr<Pending> pending(static_cast<Pending*>(data));
++        bool valid = index >= 0 && static_cast<size_t>(index) < pending->responses.size();
++        pending->handler(valid ? pending->responses[index].ptr() : nullptr);
++    }, pending);
++}
++
++}
++
++#endif
+--- a/Source/WebKit/UIProcess/WebAuthentication/sinty/SintyAuthenticationPanelClient.h
++++ b/Source/WebKit/UIProcess/WebAuthentication/sinty/SintyAuthenticationPanelClient.h
+@@ -0,0 +1,37 @@
++#pragma once
++
++#if ENABLE(WEB_AUTHN)
++
++#include "APIWebAuthenticationPanel.h"
++#include "APIWebAuthenticationPanelClient.h"
++#include <wtf/WeakPtr.h>
++
++typedef struct _WebKitWebView WebKitWebView;
++
++namespace WebKit {
++
++class SintyAuthenticationPanelClient final : public API::WebAuthenticationPanelClient {
++public:
++    static Ref<SintyAuthenticationPanelClient> create(WebKitWebView*, API::WebAuthenticationPanel&);
++    ~SintyAuthenticationPanelClient();
++
++private:
++    SintyAuthenticationPanelClient(WebKitWebView*, API::WebAuthenticationPanel&);
++
++    void updatePanel(WebAuthenticationStatus) const final;
++    void dismissPanel(WebAuthenticationResult) const final;
++    void requestPin(uint64_t, CompletionHandler<void(const WTF::String&)>&&) const final;
++    void requestNewPin(uint64_t, CompletionHandler<void(const WTF::String&)>&&) const final;
++    void selectAssertionResponse(Vector<Ref<WebCore::AuthenticatorAssertionResponse>>&&, WebAuthenticationSource, CompletionHandler<void(WebCore::AuthenticatorAssertionResponse*)>&&) const final;
++
++    void askPin(uint64_t retries, bool isNew, uint64_t minLength, CompletionHandler<void(const WTF::String&)>&&) const;
++    void end(bool succeeded) const;
++
++    WebKitWebView* m_webView;
++    WeakPtr<API::WebAuthenticationPanel> m_panel;
++    mutable bool m_ended { false };
++};
++
++}
++
++#endif

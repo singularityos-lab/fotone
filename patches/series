@@ -4,3 +4,5 @@
 0004-engine-symbol-version.patch
 0005-memory-pressure-hook.patch
 0006-engine-context-menu-action-type-name.patch
+0007-web-authn-linux-transport.patch
+0008-webgpu-dawn-gbm.patch

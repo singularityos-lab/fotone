@@ -28,7 +28,7 @@ fn dialogChosen(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) cal
     c.webkit_script_dialog_unref(d);
 }
 
-const Form = struct {
+pub const Form = struct {
     win: *c.GtkWindow,
     box: *c.GtkWidget,
     entries: [2]?*c.GtkWidget = .{ null, null },
@@ -36,7 +36,7 @@ const Form = struct {
     data: c.gpointer,
     answered: bool = false,
 
-    fn new(w: *c.GtkWidget, title: [*c]const u8, message: [*c]const u8, done: *const fn (*Form, bool) void, data: c.gpointer) *Form {
+    pub fn new(w: *c.GtkWidget, title: [*c]const u8, message: [*c]const u8, done: *const fn (*Form, bool) void, data: c.gpointer) *Form {
         const f: *Form = @ptrCast(@alignCast(c.g_malloc0(@sizeOf(Form))));
         const win: *c.GtkWindow = @ptrCast(@alignCast(c.gtk_window_new()));
         c.gtk_window_set_modal(win, 1);
@@ -60,7 +60,7 @@ const Form = struct {
         return f;
     }
 
-    fn entry(f: *Form, i: usize, initial: [*c]const u8, hidden: bool) void {
+    pub fn entry(f: *Form, i: usize, initial: [*c]const u8, hidden: bool) void {
         const e = c.gtk_entry_new();
         if (initial != null) c.gtk_editable_set_text(@ptrCast(e), initial);
         if (hidden) c.gtk_entry_set_visibility(@ptrCast(e), 0);
@@ -69,27 +69,29 @@ const Form = struct {
         f.entries[i] = e;
     }
 
-    fn text(f: *Form, i: usize) [*c]const u8 {
+    pub fn text(f: *Form, i: usize) [*c]const u8 {
         const e = f.entries[i] orelse return null;
         return c.gtk_editable_get_text(@ptrCast(e));
     }
 
-    fn show(f: *Form, accept: [*c]const u8) void {
+    pub fn show(f: *Form, accept: [*c]const u8) void {
         const row = c.gtk_box_new(c.GTK_ORIENTATION_HORIZONTAL, 6);
         c.gtk_widget_set_halign(row, c.GTK_ALIGN_END);
         const cancel = c.gtk_button_new_with_mnemonic(tr("_Cancel"));
-        const ok = c.gtk_button_new_with_mnemonic(accept);
-        c.gtk_widget_add_css_class(ok, "suggested-action");
         _ = c.g_signal_connect_data(cancel, "clicked", @ptrCast(&cancelled), f, null, 0);
-        _ = c.g_signal_connect_data(ok, "clicked", @ptrCast(&accepted), f, null, 0);
         c.gtk_box_append(@ptrCast(row), cancel);
-        c.gtk_box_append(@ptrCast(row), ok);
+        if (accept != null) {
+            const ok = c.gtk_button_new_with_mnemonic(accept);
+            c.gtk_widget_add_css_class(ok, "suggested-action");
+            _ = c.g_signal_connect_data(ok, "clicked", @ptrCast(&accepted), f, null, 0);
+            c.gtk_box_append(@ptrCast(row), ok);
+            c.gtk_window_set_default_widget(f.win, ok);
+        }
         c.gtk_box_append(@ptrCast(f.box), row);
-        c.gtk_window_set_default_widget(f.win, ok);
         c.gtk_window_present(f.win);
     }
 
-    fn finish(f: *Form, ok: bool) void {
+    pub fn finish(f: *Form, ok: bool) void {
         if (f.answered) return;
         f.answered = true;
         f.done(f, ok);

@@ -15,6 +15,11 @@ const dnr = @import("dnr.zig");
 const widevine = @import("widevine.zig");
 const sites = @import("sites.zig");
 const files = @import("files.zig");
+const authn = @import("authn.zig");
+
+comptime {
+    _ = authn;
+}
 
 pub const WebView = extern struct {
     parent: c.GtkWidget,
@@ -762,6 +767,7 @@ test {
     _ = dnr;
     _ = widevine;
     _ = sites;
+    _ = authn;
 }
 
 test "gestures clamp zoom and need a long swipe" {
