@@ -34,6 +34,9 @@ engine needs live as patches in `patches/`.
 Per-site user agents, autoplay policies and engine settings live in `site-exceptions.json`, read from
 `$XDG_CONFIG_HOME/fotone` first and then from the system data directories.
 
+A web app can ask for a window material with `<meta name="sinty-material" content="liquid">`
+(`glass` and `blur` also work); on Singularity the window then shows through the page background.
+
 `zig build engine` downloads the pinned release, checks its sha256, applies the patches
 and builds WebKit with the Sinty options.
 
