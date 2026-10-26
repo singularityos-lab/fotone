@@ -1,12 +1,12 @@
-0001-wpe-accent-color.patch
-0002-fotone-sandbox-launcher.patch
-0003-engine-view-type-name.patch
-0004-engine-symbol-version.patch
-0005-memory-pressure-hook.patch
-0006-engine-context-menu-action-type-name.patch
-0007-web-authn-linux-transport.patch
-0008-webgpu-dawn-gbm.patch
-0009-sinty-media-engine.patch
-0010-xdg-mime-ambiguous-extension.patch
-0011-web-authn-non-cocoa-build.patch
-0012-webdriver-and-gpu-build-fixes.patch
+upstream 0001-wpe-accent-color.patch
+fotone 0002-fotone-sandbox-launcher.patch
+fotone 0003-engine-view-type-name.patch
+fotone 0004-engine-symbol-version.patch
+fotone 0005-memory-pressure-hook.patch
+fotone 0006-engine-context-menu-action-type-name.patch
+fotone 0007-web-authn-linux-transport.patch
+fotone 0008-webgpu-dawn-gbm.patch
+fotone 0009-sinty-media-engine.patch
+upstream 0010-xdg-mime-ambiguous-extension.patch
+fotone 0011-web-authn-non-cocoa-build.patch
+fotone 0012-webdriver-and-gpu-build-fixes.patch

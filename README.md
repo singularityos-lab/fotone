@@ -10,7 +10,9 @@ engine needs live as patches in `patches/`.
 ## Components
 
 - `upstream/`: the pinned WPE WebKit release and its checksum.
-- `patches/`: changes applied on top of upstream, one file per change.
+- `patches/`: changes applied on top of upstream, one file per change. `patches/series` marks each one
+  `upstream` (a generic fix to send to WebKit) or `fotone` (stays in the fork); `zig build upstream`
+  copies the first kind to `zig-out/upstream-patches`.
 - `platform/`: the Sinty WPEPlatform backend (`libfotone`, `fotone.h`).
 - `webview/`: `SitWebView`, the SIT widget that shows a page (`libsitwebview`, `sit/sitwebview.h`).
 - `viewer/`: `fotone-viewer`, a window with one `SitWebView`.

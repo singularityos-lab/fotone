@@ -172,8 +172,15 @@ pub fn build(b: *std.Build) void {
         \\[ -f "$t" ] || curl -fsSL -o "$t" "$2"
         \\echo "$3  $t" | sha256sum -c -
         \\tar -C "$(dirname "$1")" -xf "$t"
-        \\for p in $(cat "$4"); do patch -d "$1" -p1 -N < "$(dirname "$4")/$p"; done
+        \\for p in $(awk '{print $2}' "$4"); do patch -d "$1" -p1 -N < "$(dirname "$4")/$p"; done
     , "fetch", src, comptime pinValue("url"), comptime pinValue("sha256"), b.pathFromRoot("patches/series") });
+
+    const upstream_step = b.step("upstream", "collect the patches meant for WebKit upstream");
+    const collect = b.addSystemCommand(&.{ "sh", "-ec",
+        \\mkdir -p "$1"
+        \\awk '$1 == "upstream" {print $2}' "$2" | while read -r p; do cp "$(dirname "$2")/$p" "$1/"; echo "$p"; done
+    , "upstream", b.getInstallPath(.prefix, "upstream-patches"), b.pathFromRoot("patches/series") });
+    upstream_step.dependOn(&collect.step);
 
     const hooks = b.addLibrary(.{
         .name = "fotone-hooks",
