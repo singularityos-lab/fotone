@@ -17,10 +17,12 @@ const sites = @import("sites.zig");
 const files = @import("files.zig");
 const authn = @import("authn.zig");
 const pagetr = @import("translate.zig");
+const material = @import("material.zig");
 
 comptime {
     _ = authn;
     _ = pagetr;
+    _ = material;
 }
 
 pub const WebView = extern struct {
@@ -216,10 +218,22 @@ fn wake(w: *WebView) void {
     if (item != null) c.webkit_web_view_go_to_back_forward_list_item(web, item) else w.holding = 0;
 }
 
+fn materialRead(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv(.c) void {
+    const v = c.webkit_web_view_evaluate_javascript_finish(@ptrCast(@alignCast(src)), res, null) orelse return;
+    defer c.g_object_unref(v);
+    const text = c.jsc_value_to_string(v);
+    defer c.g_free(text);
+    if (text == null) return;
+    const w = of(data);
+    if (material.apply(widget(w), material.parse(std.mem.span(text)))) sit_web_view_set_transparent(w, 1);
+}
+
 fn loadChanged(web: ?*c.WebKitWebView, event: c.WebKitLoadEvent, data: c.gpointer) callconv(.c) void {
     const w = of(data);
     if (event == c.WEBKIT_LOAD_COMMITTED and w.state == null) w.holding = 0;
-    if (event == c.WEBKIT_LOAD_FINISHED and w.passwords != 0) passwords.fill(web orelse return);
+    if (event != c.WEBKIT_LOAD_FINISHED) return;
+    if (perms.appOf(web) != null and w.transparent == 0) c.webkit_web_view_evaluate_javascript(web, material.query, -1, null, null, null, materialRead, w);
+    if (w.passwords != 0) passwords.fill(web orelse return);
 }
 
 fn submitForm(web: ?*c.WebKitWebView, req: ?*c.WebKitFormSubmissionRequest, data: c.gpointer) callconv(.c) void {
