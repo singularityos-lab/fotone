@@ -9,3 +9,4 @@
 0009-sinty-media-engine.patch
 0010-xdg-mime-ambiguous-extension.patch
 0011-web-authn-non-cocoa-build.patch
+0012-webdriver-and-gpu-build-fixes.patch

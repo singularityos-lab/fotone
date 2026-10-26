@@ -1,0 +1,193 @@
+--- a/Source/WebCore/Modules/webdriver/NavigatorWebDriver.cpp
++++ b/Source/WebCore/Modules/webdriver/NavigatorWebDriver.cpp
+@@ -33,12 +33,22 @@
+ #include "Page.h"
+ #include "Settings.h"
+ #include <wtf/TZoneMallocInlines.h>
++#include <stdlib.h>
+ 
+ namespace WebCore {
+ using namespace JSC;
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(NavigatorWebDriver);
+ 
++static bool automationHidden()
++{
++    static const bool hidden = [] {
++        const char* value = getenv("FOTONE_AUTOMATION_HIDDEN");
++        return value && *value && *value != '0';
++    }();
++    return hidden;
++}
++
+ NavigatorWebDriver::NavigatorWebDriver() = default;
+ 
+ NavigatorWebDriver::~NavigatorWebDriver() = default;
+@@ -57,7 +67,7 @@
+     case NavigatorWebDriverActivePolicy::Auto:
+         break;
+     }
+-    return frame->page()->isControlledByAutomation();
++    return frame->page()->isControlledByAutomation() && !automationHidden();
+ }
+ 
+ NavigatorWebDriver* NavigatorWebDriver::from(Navigator* navigator)
+--- a/Source/WebCore/PlatformWPE.cmake
++++ b/Source/WebCore/PlatformWPE.cmake
+@@ -92,6 +92,13 @@
+     list(APPEND WebCore_SYSTEM_INCLUDE_DIRECTORIES ${OPENXR_INCLUDE_DIRS})
+ endif ()
+ 
++if (ENABLE_WEB_AUTHN)
++    list(APPEND WebCore_SOURCES
++        Modules/webauthn/AuthenticationExtensionsClientInputs.cpp
++        Modules/webauthn/AuthenticationExtensionsClientOutputs.cpp
++    )
++endif ()
++
+ if (ENABLE_DRAG_SUPPORT)
+     list(APPEND WebCore_SOURCES
+         platform/skia/DragImageSkia.cpp
+--- a/Source/WebDriver/wpe/WebDriverServiceWPE.cpp
++++ b/Source/WebDriver/wpe/WebDriverServiceWPE.cpp
+@@ -29,6 +29,7 @@
+ #include "Capabilities.h"
+ #include "CommandResult.h"
+ #include <wtf/JSONValues.h>
++#include <stdlib.h>
+ #include <wtf/text/StringToIntegerConversion.h>
+ 
+ namespace WebDriver {
+@@ -106,7 +107,8 @@
+ 
+ void WebDriverService::platformParseCapabilities(const JSON::Object& matchedCapabilities, Capabilities& capabilities) const
+ {
+-    capabilities.browserBinary = String("MiniBrowser"_s);
++    const char* defaultBrowser = getenv("FOTONE_WEBDRIVER_BROWSER");
++    capabilities.browserBinary = defaultBrowser && *defaultBrowser ? String::fromUTF8(defaultBrowser) : String("MiniBrowser"_s);
+     capabilities.browserArguments = Vector<String> { "--automation"_s };
+ 
+     auto browserOptions = matchedCapabilities.getObject("wpe:browserOptions"_s);
+--- a/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.cpp
++++ b/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteCompositorIntegration.cpp
+@@ -103,9 +103,9 @@
+ 
+ void RemoteCompositorIntegration::prepareForDisplay(uint32_t frameIndex, CompletionHandler<void(bool)>&& completionHandler)
+ {
+-    protect(m_backing)->prepareForDisplay(frameIndex, [completionHandler = WTF::move(completionHandler)]() mutable {
++    protect(m_backing)->prepareForDisplay(frameIndex, CompletionHandler<void()> { [completionHandler = WTF::move(completionHandler)]() mutable {
+         completionHandler(true);
+-    });
++    } });
+ }
+ 
+ void RemoteCompositorIntegration::updateContentsHeadroom(float headroom)
+--- a/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteGPU.cpp
++++ b/Source/WebKit/GPUProcess/graphics/WebGPU/RemoteGPU.cpp
+@@ -30,7 +30,9 @@
+ 
+ #include "GPUConnectionToWebProcess.h"
+ #include "Logging.h"
++#if ENABLE(GPU_PROCESS_MODEL)
+ #include "MeshImpl.h"
++#endif
+ #include "ModelObjectHeap.h"
+ #include "RemoteAdapter.h"
+ #include "RemoteCompositorIntegration.h"
+--- a/Source/WebKit/PlatformWPE.cmake
++++ b/Source/WebKit/PlatformWPE.cmake
+@@ -833,6 +833,7 @@
+     list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
+         "${WEBKIT_DIR}/UIProcess/WebAuthentication/fido"
+         "${WEBKIT_DIR}/UIProcess/WebAuthentication/sinty"
++        "${WEBKIT_DIR}/WebProcess/DigitalCredentials"
+         "${WEBKIT_DIR}/WebProcess/WebAuthentication"
+     )
+     list(APPEND WebKit_SOURCES
+--- a/Source/WebKit/UIProcess/API/glib/WebKitAutomationSession.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitAutomationSession.cpp
+@@ -101,9 +101,12 @@
+ 
+     void requestNewPageWithOptions(WebAutomationSession&, API::AutomationSessionBrowsingContextOptions options, CompletionHandler<void(WebPageProxy*)>&& completionHandler) override
+     {
+-        WebKitWebView* webView = nullptr;
++        GObject* object = nullptr;
+         GQuark detail = options & API::AutomationSessionBrowsingContextOptionsPreferNewTab ? g_quark_from_string("tab") : g_quark_from_string("window");
+-        g_signal_emit(m_session, signals[CREATE_WEB_VIEW], detail, &webView);
++        g_signal_emit(m_session, signals[CREATE_WEB_VIEW], detail, &object);
++        WebKitWebView* webView = nullptr;
++        if (object)
++            webView = WEBKIT_IS_WEB_VIEW(object) ? WEBKIT_WEB_VIEW(object) : static_cast<WebKitWebView*>(g_object_get_data(object, "fotone-engine-web-view"));
+         if (!webView || !webkit_web_view_is_controlled_by_automation(webView))
+             completionHandler(nullptr);
+         else
+@@ -319,7 +322,7 @@
+         0,
+         nullptr, nullptr,
+         g_cclosure_marshal_generic,
+-        WEBKIT_TYPE_WEB_VIEW, 0,
++        G_TYPE_OBJECT, 0,
+         G_TYPE_NONE);
+ 
+ 
+--- a/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
++++ b/Source/WebKit/UIProcess/Automation/WebAutomationSession.cpp
+@@ -2090,7 +2090,7 @@
+     return { };
+ }
+ 
+-#if ENABLE(WEB_AUTHN)
++#if ENABLE(WEB_AUTHN) && PLATFORM(COCOA)
+ static WebCore::AuthenticatorTransport NODELETE toAuthenticatorTransport(Inspector::Protocol::Automation::AuthenticatorTransport transport)
+ {
+     switch (transport) {
+@@ -2107,7 +2107,7 @@
+         return WebCore::AuthenticatorTransport::Internal;
+     }
+ }
+-#endif // ENABLE(WEB_AUTHN)
++#endif
+ 
+ CommandResult<String /* authenticatorId */> WebAutomationSession::addVirtualAuthenticator(const String& browsingContextHandle, Ref<JSON::Object>&& authenticator)
+ {
+--- a/Source/WebKit/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.cpp
++++ b/Source/WebKit/UIProcess/WebAuthentication/WebAuthenticatorCoordinatorProxy.cpp
+@@ -243,6 +243,26 @@
+ {
+     handler(false);
+ }
++
++void WebAuthenticatorCoordinatorProxy::getClientCapabilities(const SecurityOriginData&, CapabilitiesCompletionHandler&& handler)
++{
++    handler({ });
++}
++
++void WebAuthenticatorCoordinatorProxy::signalUnknownCredential(const SecurityOriginData&, WebCore::UnknownCredentialOptions&&, CompletionHandler<void(std::optional<WebCore::ExceptionData>)>&& handler)
++{
++    handler(std::nullopt);
++}
++
++void WebAuthenticatorCoordinatorProxy::signalAllAcceptedCredentials(const SecurityOriginData&, WebCore::AllAcceptedCredentialsOptions&&, CompletionHandler<void(std::optional<WebCore::ExceptionData>)>&& handler)
++{
++    handler(std::nullopt);
++}
++
++void WebAuthenticatorCoordinatorProxy::signalCurrentUserDetails(const SecurityOriginData&, WebCore::CurrentUserDetailsOptions&&, CompletionHandler<void(std::optional<WebCore::ExceptionData>)>&& handler)
++{
++    handler(std::nullopt);
++}
+ #endif // !HAVE(UNIFIED_ASC_AUTH_UI) && !HAVE(WEB_AUTHN_AS_MODERN)
+ 
+ #if HAVE(WEB_AUTHN_AS_MODERN)
+--- a/Source/WebKit/WebProcess/WebAuthentication/WebAuthenticatorCoordinator.cpp
++++ b/Source/WebKit/WebProcess/WebAuthentication/WebAuthenticatorCoordinator.cpp
+@@ -28,7 +28,9 @@
+ 
+ #if ENABLE(WEB_AUTHN)
+ 
++#if PLATFORM(COCOA)
+ #include "DefaultWebBrowserChecks.h"
++#endif
+ #include "FrameInfoData.h"
+ #include "MessageSenderInlines.h"
+ #include "WebAuthenticatorCoordinatorProxyMessages.h"

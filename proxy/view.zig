@@ -454,6 +454,7 @@ fn constructed(o: [*c]c.GObject) callconv(.c) void {
     for (values[0..total]) |*val| c.g_value_unset(val);
     p.n = 0;
     c.g_object_set_qdata(p.web, proxy_quark, v);
+    c.g_object_set_data(@ptrCast(v), "fotone-engine-web-view", p.web);
     connectRelays(v);
     const sit = c.sit_web_view_new_with_web_view(@ptrCast(p.web));
     c.gtk_widget_set_parent(sit, @ptrCast(v));
@@ -468,6 +469,7 @@ fn dispose(o: [*c]c.GObject) callconv(.c) void {
     if (p.web) |web| {
         _ = c.g_signal_handlers_disconnect_matched(web, c.G_SIGNAL_MATCH_DATA, 0, 0, null, null, of(o));
         c.g_object_set_qdata(web, proxy_quark, null);
+        c.g_object_set_data(@ptrCast(of(o)), "fotone-engine-web-view", null);
         c.g_object_unref(web);
     }
     p.web = null;
