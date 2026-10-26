@@ -1,0 +1,26 @@
+--- a/Source/WebCore/platform/xdg/MIMETypeRegistryXdg.cpp
++++ b/Source/WebCore/platform/xdg/MIMETypeRegistryXdg.cpp
+@@ -41,12 +41,18 @@
+ 
+     // Build any filename with the given extension.
+     auto filename = makeString("a."_s, string);
+-    if (const char* mimeType = xdg_mime_get_mime_type_from_file_name(filename.utf8().data())) {
+-        if (mimeType != XDG_MIME_TYPE_UNKNOWN)
+-            return String::fromUTF8(mimeType);
++    const char* mimeTypes[MAX_EXTENSION_COUNT];
++    int count = xdg_mime_get_mime_types_from_file_name(filename.utf8().data(), mimeTypes, MAX_EXTENSION_COUNT);
++    if (count <= 0)
++        return String();
++    if (count > 1) {
++        auto extension = string.convertToASCIILowercase();
++        for (int i = 0; i < count; ++i) {
++            if (preferredExtensionForMIMEType(String::fromUTF8(mimeTypes[i])) == extension)
++                return String::fromUTF8(mimeTypes[i]);
++        }
+     }
+-
+-    return String();
++    return String::fromUTF8(mimeTypes[0]);
+ }
+ 
+ bool MIMETypeRegistry::isApplicationPluginMIMEType(const String&)

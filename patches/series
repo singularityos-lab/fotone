@@ -7,3 +7,4 @@
 0007-web-authn-linux-transport.patch
 0008-webgpu-dawn-gbm.patch
 0009-sinty-media-engine.patch
+0010-xdg-mime-ambiguous-extension.patch
