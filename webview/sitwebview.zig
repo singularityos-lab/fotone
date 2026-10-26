@@ -18,6 +18,7 @@ const files = @import("files.zig");
 const authn = @import("authn.zig");
 const pagetr = @import("translate.zig");
 const material = @import("material.zig");
+const extensions = @import("extensions.zig");
 
 comptime {
     _ = authn;
@@ -513,7 +514,10 @@ fn attach(w: *WebView) void {
     _ = c.g_signal_connect_data(w.web, "permission-request", @ptrCast(&ui.permissionRequest), w, null, 0);
     _ = c.g_signal_connect_data(w.web, "submit-form", @ptrCast(&submitForm), w, null, after);
     printHook(w);
-    if (c.webkit_web_view_get_user_content_manager(w.web)) |ucm| dnr.track(ucm);
+    if (c.webkit_web_view_get_user_content_manager(w.web)) |ucm| {
+        dnr.track(ucm);
+        extensions.track(ucm);
+    }
     devtools.apply(w.web.?);
     c.g_object_set_data(@ptrCast(w.web), "fotone-widget", w);
     widevine.hook(w.web.?);
@@ -766,6 +770,18 @@ pub export fn sit_web_view_show_devtools(self: *WebView) c.gboolean {
     return @intFromBool(devtools.open(web, wrapWebView, display(), ui.windowOf(widget(self))));
 }
 
+pub export fn sit_web_view_install_extension(path: [*:0]const u8, err: [*c][*c]c.GError) [*c]u8 {
+    const id = extensions.install(std.mem.span(path), display()) catch |e| {
+        c.g_set_error(err, c.g_io_error_quark(), c.G_IO_ERROR_INVALID_DATA, "%s: %s", path, @errorName(e).ptr);
+        return null;
+    };
+    return c.g_strdup(id.ptr);
+}
+
+pub export fn sit_web_view_remove_extension(id: [*:0]const u8) void {
+    extensions.remove(std.mem.span(id));
+}
+
 pub export fn sit_web_view_install_rule_set(id: [*:0]const u8, rules: [*:0]const u8, done: dnr.Done, data: c.gpointer, err: [*c][*c]c.GError) c.gboolean {
     const r = dnr.install(id, std.mem.span(rules), done, data) catch {
         c.g_set_error_literal(err, c.g_io_error_quark(), c.G_IO_ERROR_INVALID_DATA, "the rules are not a declarativeNetRequest rule list");
@@ -801,6 +817,7 @@ test {
     _ = perms;
     _ = a11y;
     _ = dnr;
+    _ = extensions;
     _ = widevine;
     _ = sites;
     _ = authn;

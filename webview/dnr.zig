@@ -23,14 +23,14 @@ const Rule = struct {
     text: []u8,
 };
 
-const Out = struct {
+pub const Out = struct {
     buf: std.ArrayList(u8) = .empty,
 
-    fn raw(o: *Out, s: []const u8) !void {
+    pub fn raw(o: *Out, s: []const u8) !void {
         try o.buf.appendSlice(gpa, s);
     }
 
-    fn str(o: *Out, s: []const u8) !void {
+    pub fn str(o: *Out, s: []const u8) !void {
         try o.raw("\"");
         for (s) |ch| switch (ch) {
             '"' => try o.raw("\\\""),
@@ -45,13 +45,13 @@ const Out = struct {
         try o.raw("\"");
     }
 
-    fn key(o: *Out, k: []const u8) !void {
+    pub fn key(o: *Out, k: []const u8) !void {
         if (o.buf.items.len > 0 and o.buf.items[o.buf.items.len - 1] != '{' and o.buf.items[o.buf.items.len - 1] != '[') try o.raw(",");
         try o.str(k);
         try o.raw(":");
     }
 
-    fn item(o: *Out) !void {
+    pub fn item(o: *Out) !void {
         if (o.buf.items.len > 0 and o.buf.items[o.buf.items.len - 1] != '[') try o.raw(",");
     }
 };

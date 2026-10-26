@@ -11,6 +11,8 @@ var app_id: ?[*:0]const u8 = null;
 var rules: ?[*:0]const u8 = null;
 var view: ?*c.SitWebView = null;
 var translate = false;
+var extension: ?[*:0]const u8 = null;
+var dump = false;
 
 fn capture(_: c.gpointer) callconv(.c) c.gboolean {
     const win = window orelse return 0;
@@ -20,9 +22,29 @@ fn capture(_: c.gpointer) callconv(.c) c.gboolean {
     return 0;
 }
 
+fn dumped(src: [*c]c.GObject, res: ?*c.GAsyncResult, _: c.gpointer) callconv(.c) void {
+    var err: [*c]c.GError = null;
+    if (c.webkit_web_view_evaluate_javascript_finish(@ptrCast(@alignCast(src)), res, &err)) |value| {
+        defer c.g_object_unref(value);
+        const text = c.jsc_value_to_string(value);
+        defer c.g_free(text);
+        std.debug.print("{s}\n", .{text});
+    } else {
+        std.log.warn("fotone-viewer: {s}", .{err.*.message});
+        c.g_error_free(err);
+    }
+    if (window) |win| c.gtk_window_destroy(@ptrCast(win));
+}
+
+fn readText(_: c.gpointer) callconv(.c) c.gboolean {
+    c.webkit_web_view_evaluate_javascript(c.sit_web_view_get_web_view(view), "document.body.innerText", -1, null, null, null, dumped, null);
+    return 0;
+}
+
 fn loaded(_: ?*c.WebKitWebView, event: c.WebKitLoadEvent, _: c.gpointer) callconv(.c) void {
     if (event != c.WEBKIT_LOAD_FINISHED) return;
     if (translate) c.sit_web_view_translate(view);
+    if (dump) _ = c.g_timeout_add(3000, readText, null);
     if (shot != null) _ = c.g_timeout_add(if (translate) 5000 else 1500, capture, null);
 }
 
@@ -57,6 +79,14 @@ fn activate(app: ?*c.GtkApplication, _: c.gpointer) callconv(.c) void {
     _ = c.g_object_bind_property(c.sit_web_view_get_web_view(view), "title", win, "title", c.G_BINDING_SYNC_CREATE);
     c.gtk_window_set_child(@ptrCast(win), child);
     _ = c.g_signal_connect_data(c.sit_web_view_get_web_view(view), "load-changed", @ptrCast(&loaded), null, null, 0);
+    if (extension) |path| {
+        var err: [*c]c.GError = null;
+        const id = c.sit_web_view_install_extension(path, &err);
+        if (id == null) {
+            std.log.warn("fotone-viewer: {s}", .{err.*.message});
+            c.g_error_free(err);
+        } else c.g_free(id);
+    }
     if (rules == null or !applyRules(rules.?)) c.sit_web_view_load_uri(view, uri);
     c.gtk_window_present(@ptrCast(win));
 }
@@ -75,6 +105,11 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, args[i], "--rules") and i + 1 < args.len) {
             rules = try arena.dupeZ(u8, args[i + 1]);
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--extension") and i + 1 < args.len) {
+            extension = try arena.dupeZ(u8, args[i + 1]);
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--dump")) {
+            dump = true;
         } else if (std.mem.eql(u8, args[i], "--translate")) {
             translate = true;
         } else uri = try arena.dupeZ(u8, args[i]);

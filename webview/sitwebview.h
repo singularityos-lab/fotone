@@ -46,6 +46,10 @@ gboolean       sit_web_view_install_rule_set (const char *id,
                                               GError    **error);
 void           sit_web_view_remove_rule_set (const char *id);
 
+char          *sit_web_view_install_extension (const char  *path,
+                                               GError     **error);
+void           sit_web_view_remove_extension  (const char  *id);
+
 G_END_DECLS
 
 #endif

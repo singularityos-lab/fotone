@@ -34,6 +34,12 @@ engine needs live as patches in `patches/`.
 Per-site user agents, autoplay policies and engine settings live in `site-exceptions.json`, read from
 `$XDG_CONFIG_HOME/fotone` first and then from the system data directories.
 
+`sit_web_view_install_extension` loads an unpacked Manifest V3 extension into every `SitWebView`:
+content scripts and styles run in the extension's own script world, `chrome.runtime` messages reach
+its service worker, `chrome.storage.local` keeps its data under `$XDG_DATA_HOME/fotone/extensions`,
+`chrome.i18n` reads `_locales`, and static `declarativeNetRequest` rule sets become engine content rules.
+`fotone-viewer --extension DIR` loads one for testing.
+
 A web app can ask for a window material with `<meta name="sinty-material" content="liquid">`
 (`glass` and `blur` also work); on Singularity the window then shows through the page background.
 
