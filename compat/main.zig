@@ -142,7 +142,24 @@ fn evaluated(src: [*c]c.GObject, res: ?*c.GAsyncResult, _: c.gpointer) callconv(
     _ = c.printf("run zoom %.2f\n", get_zoom(view));
     const back = sym(*const fn (?*c.GtkWidget) callconv(.c) c.gboolean, "webkit_web_view_can_go_back").?;
     _ = c.printf("run back %d\n", back(view));
+    if (options.gtk3 and c.g_getenv("FOTONE_COMPAT_SHOT") != null) {
+        _ = c.g_timeout_add(1500, shoot, null);
+        return;
+    }
     c.g_main_loop_quit(loop);
+}
+
+fn shoot(_: c.gpointer) callconv(.c) c.gboolean {
+    const w = c.gtk_widget_get_allocated_width(view);
+    const h = c.gtk_widget_get_allocated_height(view);
+    const s = c.cairo_image_surface_create(c.CAIRO_FORMAT_ARGB32, w, h);
+    defer c.cairo_surface_destroy(s);
+    const cr = c.cairo_create(s);
+    c.gtk_widget_draw(view, cr);
+    c.cairo_destroy(cr);
+    _ = c.printf("run shot %d\n", @as(c_int, @intCast(c.cairo_surface_write_to_png(s, c.g_getenv("FOTONE_COMPAT_SHOT")))));
+    c.g_main_loop_quit(loop);
+    return 0;
 }
 
 var finished = false;
@@ -193,7 +210,10 @@ fn run() void {
     }
     _ = c.g_signal_connect_data(view, "load-changed", @ptrCast(&loadChanged), null, null, 0);
     _ = c.g_signal_connect_data(view, "notify::title", @ptrCast(&titleChanged), null, null, 0);
-    load(view, "<title>fotone</title><p>compat</p>", "https://compat.invalid/");
+    var html: [*c]u8 = null;
+    defer c.g_free(html);
+    if (c.g_getenv("FOTONE_COMPAT_HTML")) |file| _ = c.g_file_get_contents(file, &html, null, null);
+    load(view, if (html != null) html else "<title>fotone</title><p>compat</p>", "https://compat.invalid/");
     loop = c.g_main_loop_new(null, 0);
     _ = c.g_timeout_add_seconds(30, timeout, null);
     c.g_main_loop_run(loop);

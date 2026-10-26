@@ -292,6 +292,9 @@ fn map(wd: [*c]c.GtkWidget) callconv(.c) void {
     v.priv.clock = c.gtk_widget_get_frame_clock(wd);
     if (v.priv.clock) |k| v.priv.paint = c.g_signal_connect_data(k, "after-paint", @ptrCast(&afterPaint), v, null, 0);
     if (v.priv.view) |w| c.wpe_view_set_toplevel(w, v.priv.toplevel);
+    var a: c.GtkAllocation = undefined;
+    c.gtk_widget_get_allocation(wd, &a);
+    if (v.priv.toplevel) |t| c.fotone_toplevel_configure(t, a.width, a.height, @floatFromInt(@max(c.gtk_widget_get_scale_factor(wd), 1)));
 }
 
 fn unmap(wd: [*c]c.GtkWidget) callconv(.c) void {
