@@ -1,7 +1,8 @@
 const std = @import("std");
 const c = @import("c.zig").c;
+const options = @import("options");
 
-const names = @embedFile("webkitgtk-6.0.syms");
+const names = if (options.gtk3) @embedFile("webkit2gtk-4.1.syms") else @embedFile("webkitgtk-6.0.syms");
 
 const GetType = *const fn () callconv(.c) c.GType;
 
@@ -15,7 +16,7 @@ fn sym(comptime T: type, name: [*:0]const u8) ?T {
 }
 
 fn usage() noreturn {
-    _ = c.printf("usage: fotone-compat <libwebkitgtk-6.0.so> [--run]\n");
+    _ = c.printf("usage: fotone-compat <libwebkitgtk.so> [--run]\n");
     std.process.exit(2);
 }
 
@@ -144,11 +145,29 @@ fn evaluated(src: [*c]c.GObject, res: ?*c.GAsyncResult, _: c.gpointer) callconv(
     c.g_main_loop_quit(loop);
 }
 
+var finished = false;
+var evaluating = false;
+
+fn evaluate(v: ?*c.GtkWidget) void {
+    if (evaluating or !finished) return;
+    var title: [*c]u8 = null;
+    c.g_object_get(v, "title", &title, @as([*c]const u8, null));
+    defer c.g_free(title);
+    if (title == null) return;
+    evaluating = true;
+    const eval = sym(*const fn (?*c.GtkWidget, [*c]const u8, isize, [*c]const u8, [*c]const u8, ?*c.GCancellable, c.GAsyncReadyCallback, c.gpointer) callconv(.c) void, "webkit_web_view_evaluate_javascript").?;
+    eval(v, "6*7", -1, null, null, null, evaluated, null);
+}
+
+fn titleChanged(v: ?*c.GtkWidget, _: ?*c.GParamSpec, _: c.gpointer) callconv(.c) void {
+    evaluate(v);
+}
+
 fn loadChanged(v: ?*c.GtkWidget, event: c_int, _: c.gpointer) callconv(.c) void {
     _ = c.printf("run load %d\n", event);
     if (event != 3) return;
-    const eval = sym(*const fn (?*c.GtkWidget, [*c]const u8, isize, [*c]const u8, [*c]const u8, ?*c.GCancellable, c.GAsyncReadyCallback, c.gpointer) callconv(.c) void, "webkit_web_view_evaluate_javascript").?;
-    eval(v, "6*7", -1, null, null, null, evaluated, null);
+    finished = true;
+    evaluate(v);
 }
 
 fn timeout(_: c.gpointer) callconv(.c) c.gboolean {
@@ -158,21 +177,27 @@ fn timeout(_: c.gpointer) callconv(.c) c.gboolean {
 }
 
 fn run() void {
-    c.gtk_init();
+    if (options.gtk3) c.gtk_init(null, null) else c.gtk_init();
     const new = sym(*const fn () callconv(.c) ?*c.GtkWidget, "webkit_web_view_new").?;
     const load = sym(*const fn (?*c.GtkWidget, [*c]const u8, [*c]const u8) callconv(.c) void, "webkit_web_view_load_html").?;
-    const win = c.gtk_window_new();
+    const win = if (options.gtk3) c.gtk_window_new(c.GTK_WINDOW_TOPLEVEL) else c.gtk_window_new();
     c.gtk_window_set_default_size(@ptrCast(win), 640, 480);
     view = new();
     _ = c.printf("run widget %s\n", c.g_type_name(c.G_TYPE_FROM_INSTANCE(view)));
-    c.gtk_window_set_child(@ptrCast(win), view);
-    c.gtk_window_present(@ptrCast(win));
+    if (options.gtk3) {
+        c.gtk_container_add(@ptrCast(win), view);
+        c.gtk_widget_show_all(win);
+    } else {
+        c.gtk_window_set_child(@ptrCast(win), view);
+        c.gtk_window_present(@ptrCast(win));
+    }
     _ = c.g_signal_connect_data(view, "load-changed", @ptrCast(&loadChanged), null, null, 0);
+    _ = c.g_signal_connect_data(view, "notify::title", @ptrCast(&titleChanged), null, null, 0);
     load(view, "<title>fotone</title><p>compat</p>", "https://compat.invalid/");
     loop = c.g_main_loop_new(null, 0);
     _ = c.g_timeout_add_seconds(30, timeout, null);
     c.g_main_loop_run(loop);
-    c.gtk_window_destroy(@ptrCast(win));
+    if (options.gtk3) c.gtk_widget_destroy(win) else c.gtk_window_destroy(@ptrCast(win));
 }
 
 pub fn main(init: std.process.Init) !u8 {

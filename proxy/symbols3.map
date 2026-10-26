@@ -1,0 +1,6 @@
+WEBKIT2GTK_4.1 {
+global:
+  webkit_*;
+local:
+  *;
+};

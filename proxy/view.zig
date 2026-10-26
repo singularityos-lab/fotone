@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @import("c.zig").c;
-const engine = @import("engine.zig");
+const engine = @import("engine");
 const extra = @import("extra.zig");
 const gtkonly = @import("gtkonly.zig");
 
@@ -157,6 +157,18 @@ pub fn toEngine(p: ?*anyopaque) ?*anyopaque {
 pub fn sitOf(p: ?*anyopaque) ?*c.SitWebView {
     if (!isA(p, viewType())) return null;
     return @ptrCast(@alignCast(of(p).priv.sit));
+}
+
+pub const PrintDone = *const fn (c.gpointer, c.gboolean) callconv(.c) void;
+
+pub fn print(view: ?*c.GObject, parent: ?*c.GtkWindow, settings: ?*c.GtkPrintSettings, setup: ?*c.GtkPageSetup, dialog: bool, done: PrintDone, data: c.gpointer) bool {
+    const sit = sitOf(view) orelse return false;
+    c.sit_web_view_print(sit, parent, settings, setup, @intFromBool(dialog), done, data);
+    return true;
+}
+
+pub fn showDevtools(view: ?*c.GObject) void {
+    if (sitOf(view)) |sit| _ = c.sit_web_view_show_devtools(sit);
 }
 
 fn printRequested(_: ?*c.GtkWidget, data: c.gpointer) callconv(.c) c.gboolean {
@@ -485,106 +497,6 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     installSignals(c.G_TYPE_FROM_CLASS(klass));
 }
 
-const Async = struct {
-    cb: c.GAsyncReadyCallback,
-    data: c.gpointer,
-    view: ?*anyopaque,
-
-    fn wrap(cb: c.GAsyncReadyCallback, data: c.gpointer, view: ?*anyopaque) *Async {
-        const a: *Async = @ptrCast(@alignCast(c.g_malloc0(@sizeOf(Async))));
-        a.* = .{ .cb = cb, .data = data, .view = if (view) |p| c.g_object_ref(p) else null };
-        return a;
-    }
-
-    fn done(_: [*c]c.GObject, res: ?*c.GAsyncResult, d: c.gpointer) callconv(.c) void {
-        const a: *Async = @ptrCast(@alignCast(d));
-        defer c.g_free(a);
-        defer if (a.view) |p| c.g_object_unref(p);
-        if (a.cb) |cb| cb(@ptrCast(@alignCast(a.view)), res, a.data);
-    }
-};
-
-fn isViewPtr(comptime T: type) bool {
-    return T == [*c]c.WebKitWebView or T == ?*c.WebKitWebView or T == *c.WebKitWebView;
-}
-
-fn Wrap(comptime name: [:0]const u8) type {
-    const F = @TypeOf(@field(c, name));
-    const info = @typeInfo(F).@"fn";
-    const P = info.params;
-    const R = info.return_type.?;
-    return struct {
-        fn T(comptime i: usize) type {
-            return P[i].type.?;
-        }
-
-        fn call(args: std.meta.ArgsTuple(F)) R {
-            var a = args;
-            inline for (P, 0..) |p, i| {
-                if (comptime p.type.? == c.GAsyncReadyCallback and i + 1 < P.len) {
-                    if (a[i] != null) {
-                        a[i + 1] = Async.wrap(a[i], a[i + 1], if (P.len > 0 and comptime isViewPtr(P[0].type.?)) @ptrCast(a[0]) else null);
-                        a[i] = Async.done;
-                    }
-                } else if (comptime isViewPtr(p.type.?)) {
-                    a[i] = @ptrCast(@alignCast(toEngine(@ptrCast(a[i]))));
-                }
-            }
-            const r = @call(.auto, engine.lookup(name, F), a);
-            if (comptime isViewPtr(R)) return @ptrCast(@alignCast(toProxy(@ptrCast(r))));
-            return r;
-        }
-
-        fn f0() callconv(.c) R {
-            return call(.{});
-        }
-        fn f1(a0: T(0)) callconv(.c) R {
-            return call(.{a0});
-        }
-        fn f2(a0: T(0), a1: T(1)) callconv(.c) R {
-            return call(.{ a0, a1 });
-        }
-        fn f3(a0: T(0), a1: T(1), a2: T(2)) callconv(.c) R {
-            return call(.{ a0, a1, a2 });
-        }
-        fn f4(a0: T(0), a1: T(1), a2: T(2), a3: T(3)) callconv(.c) R {
-            return call(.{ a0, a1, a2, a3 });
-        }
-        fn f5(a0: T(0), a1: T(1), a2: T(2), a3: T(3), a4: T(4)) callconv(.c) R {
-            return call(.{ a0, a1, a2, a3, a4 });
-        }
-        fn f6(a0: T(0), a1: T(1), a2: T(2), a3: T(3), a4: T(4), a5: T(5)) callconv(.c) R {
-            return call(.{ a0, a1, a2, a3, a4, a5 });
-        }
-        fn f7(a0: T(0), a1: T(1), a2: T(2), a3: T(3), a4: T(4), a5: T(5), a6: T(6)) callconv(.c) R {
-            return call(.{ a0, a1, a2, a3, a4, a5, a6 });
-        }
-        fn f8(a0: T(0), a1: T(1), a2: T(2), a3: T(3), a4: T(4), a5: T(5), a6: T(6), a7: T(7)) callconv(.c) R {
-            return call(.{ a0, a1, a2, a3, a4, a5, a6, a7 });
-        }
-        fn f9(a0: T(0), a1: T(1), a2: T(2), a3: T(3), a4: T(4), a5: T(5), a6: T(6), a7: T(7), a8: T(8)) callconv(.c) R {
-            return call(.{ a0, a1, a2, a3, a4, a5, a6, a7, a8 });
-        }
-
-        fn exportIt() void {
-            const opts: std.builtin.ExportOptions = .{ .name = name };
-            switch (P.len) {
-                0 => @export(&f0, opts),
-                1 => @export(&f1, opts),
-                2 => @export(&f2, opts),
-                3 => @export(&f3, opts),
-                4 => @export(&f4, opts),
-                5 => @export(&f5, opts),
-                6 => @export(&f6, opts),
-                7 => @export(&f7, opts),
-                8 => @export(&f8, opts),
-                9 => @export(&f9, opts),
-                else => @compileError(name ++ " has too many parameters"),
-            }
-        }
-    };
-}
-
 const wrapped =
     \\call_async_javascript_function call_async_javascript_function_finish can_execute_editing_command
     \\can_execute_editing_command_finish can_go_back can_go_forward can_show_mime_type download_uri
@@ -613,8 +525,8 @@ const returning_views = [_][:0]const u8{
 comptime {
     @setEvalBranchQuota(1000000);
     var it = std.mem.tokenizeAny(u8, wrapped, " \n");
-    while (it.next()) |n| Wrap(std.fmt.comptimePrint("webkit_web_view_{s}", .{n})).exportIt();
-    for (returning_views) |n| Wrap(n).exportIt();
+    while (it.next()) |n| engine.Wrap(c, @This(), std.fmt.comptimePrint("webkit_web_view_{s}", .{n})).exportIt();
+    for (returning_views) |n| engine.Wrap(c, @This(), n).exportIt();
 }
 
 export fn webkit_web_view_get_type() c.GType {

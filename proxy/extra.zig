@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
-const proxy_view = @import("view.zig");
+const options = @import("options");
+const host = if (options.gtk3) @import("view3.zig") else @import("view.zig");
 
 const Priv = struct {
     view: ?*c.GObject = null,
@@ -107,12 +108,13 @@ const RW = c.G_PARAM_READWRITE | c.G_PARAM_STATIC_STRINGS;
 
 fn printClassInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     const oc = baseInit(klass);
-    c.g_object_class_install_property(oc, PROP_WEB_VIEW, c.g_param_spec_object("web-view", null, null, proxy_view.viewType(), RW | c.G_PARAM_CONSTRUCT_ONLY));
+    c.g_object_class_install_property(oc, PROP_WEB_VIEW, c.g_param_spec_object("web-view", null, null, host.viewType(), RW | c.G_PARAM_CONSTRUCT_ONLY));
     c.g_object_class_install_property(oc, PROP_PRINT_SETTINGS, c.g_param_spec_object("print-settings", null, null, c.gtk_print_settings_get_type(), RW));
     c.g_object_class_install_property(oc, PROP_PAGE_SETUP, c.g_param_spec_object("page-setup", null, null, c.gtk_page_setup_get_type(), RW));
     const t = c.G_TYPE_FROM_CLASS(klass);
     print_finished = c.g_signal_new("finished", t, c.G_SIGNAL_RUN_LAST, 0, null, null, c.g_cclosure_marshal_generic, c.G_TYPE_NONE, 0);
     _ = c.g_signal_new("failed", t, c.G_SIGNAL_RUN_LAST, 0, null, null, c.g_cclosure_marshal_generic, c.G_TYPE_NONE, 1, c.g_error_get_type());
+    if (options.gtk3) _ = c.g_signal_new("create-custom-widget", t, c.G_SIGNAL_RUN_LAST, 0, null, null, c.g_cclosure_marshal_generic, @import("legacy3.zig").webkit_print_custom_widget_get_type(), 0);
 }
 
 fn chooserClassInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
@@ -199,10 +201,9 @@ fn waited(data: c.gpointer, ok: c.gboolean) callconv(.c) void {
 
 pub export fn webkit_print_operation_run_dialog(op: *Object, parent: ?*c.GtkWindow) c_int {
     defer c.g_signal_emit(op, print_finished, 0);
-    const sit = proxy_view.sitOf(op.priv.view) orelse return PRINT_CANCEL;
     var w = Wait{ .loop = c.g_main_loop_new(null, 0).? };
     defer c.g_main_loop_unref(w.loop);
-    c.sit_web_view_print(sit, parent, op.priv.settings, op.priv.setup, 1, waited, &w);
+    if (!host.print(op.priv.view, parent, op.priv.settings, op.priv.setup, true, waited, &w)) return PRINT_CANCEL;
     c.g_main_loop_run(w.loop);
     return if (w.ok != 0) PRINT_PRINT else PRINT_CANCEL;
 }
@@ -214,9 +215,8 @@ fn printedAsync(data: c.gpointer, _: c.gboolean) callconv(.c) void {
 }
 
 export fn webkit_print_operation_print(op: *Object) void {
-    const sit = proxy_view.sitOf(op.priv.view) orelse return c.g_signal_emit(op, print_finished, 0);
     _ = c.g_object_ref(op);
-    c.sit_web_view_print(sit, null, op.priv.settings, op.priv.setup, 0, printedAsync, op);
+    if (!host.print(op.priv.view, null, op.priv.settings, op.priv.setup, false, printedAsync, op)) printedAsync(op, 0);
 }
 
 export fn webkit_color_chooser_request_get_type() c.GType {
@@ -272,8 +272,7 @@ export fn webkit_web_inspector_get_attached_height(_: *Object) c.guint {
 }
 
 export fn webkit_web_inspector_show(i: *Object) void {
-    const sit = proxy_view.sitOf(i.priv.view) orelse return;
-    _ = c.sit_web_view_show_devtools(sit);
+    host.showDevtools(i.priv.view);
 }
 
 export fn webkit_web_inspector_close(_: *Object) void {}

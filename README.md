@@ -19,12 +19,17 @@ engine needs live as patches in `patches/`.
 - `ocdm/`: `libocdm`, the OpenCDM interface the engine uses for Encrypted Media. It decrypts
   ClearKey itself and drives the Widevine module, which `SitWebView` downloads from Google
   the first time a site asks for it and the user agrees.
+- `engine/`: lookups of the engine's own symbols, shared by the proxies.
 - `proxy/`: `libwebkitgtk-6.0.so.4` and `libjavascriptcoregtk-6.0.so.1` with the WebKitGTK 6.0
-  binary interface, so existing GTK 4 applications run on the Fotone engine unchanged.
+  binary interface, and `libwebkit2gtk-4.1.so.0` and `libjavascriptcoregtk-4.1.so.0` with the
+  WebKitGTK 4.1 one, so existing GTK 4 and GTK 3 applications run on the Fotone engine unchanged.
+  The 4.1 library paints pages into its own GTK 3 widget and maps the older API (web contexts,
+  JavaScript results, website data flags) onto the engine's.
 - `bump/`: `zig build bump` moves `upstream/` to the newest stable WPE WebKit release
   (`FOTONE_BUMP_TO` picks a given one); `zig build engine` then shows which patches still apply.
-- `compat/`: `fotone-compat`, which reports the symbols, types, properties, signals and
-  basic behaviour of any `libwebkitgtk-6.0` so the proxy can be diffed against WebKitGTK.
+- `compat/`: `fotone-compat` and `fotone-compat3`, which report the symbols, types, properties,
+  signals and basic behaviour of any `libwebkitgtk-6.0` or `libwebkit2gtk-4.1` so the proxies can
+  be diffed against WebKitGTK.
 
 Per-site user agents, autoplay policies and engine settings live in `site-exceptions.json`, read from
 `$XDG_CONFIG_HOME/fotone` first and then from the system data directories.

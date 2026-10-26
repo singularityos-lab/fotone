@@ -67,6 +67,29 @@ fn webviewModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarg
     return mod;
 }
 
+fn flavor(b: *std.Build, gtk3: bool) *std.Build.Step.Options {
+    const o = b.addOptions();
+    o.addOption(bool, "gtk3", gtk3);
+    return o;
+}
+
+fn proxy3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, out: []const u8, engine_mod: *std.Build.Module, platform: *std.Build.Step.Compile) *std.Build.Module {
+    const lib = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" });
+    const mod = b.createModule(.{ .root_source_file = b.path("proxy/proxy.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
+    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "include", "wpe-webkit-2.0" }) });
+    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "include", "wpe-webkit-2.0", "wpe-platform" }) });
+    mod.addIncludePath(b.path("platform"));
+    mod.addIncludePath(b.path("proxy"));
+    mod.addLibraryPath(.{ .cwd_relative = lib });
+    mod.addRPath(.{ .cwd_relative = lib });
+    mod.addImport("engine", engine_mod);
+    mod.addOptions("options", flavor(b, true));
+    mod.linkLibrary(platform);
+    mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no, .needed = true });
+    for ([_][]const u8{ "glib-2.0", "gobject-2.0", "gio-2.0", "gtk+-3.0", "cairo-gobject", "libsoup-3.0", "epoxy" }) |s| mod.linkSystemLibrary(s, .{});
+    return mod;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -154,8 +177,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run.addArgs(a);
     b.step("run", "open a page in the viewer").dependOn(&run.step);
 
+    const engine_mod = b.createModule(.{ .root_source_file = b.path("engine/engine.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
+    engine_mod.addIncludePath(b.path("engine"));
+    engine_mod.linkSystemLibrary("gobject-2.0", .{});
+
     const proxy_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out);
     proxy_mod.addIncludePath(b.path("proxy"));
+    proxy_mod.addImport("engine", engine_mod);
+    proxy_mod.addOptions("options", flavor(b, false));
     proxy_mod.linkLibrary(webview);
     const proxy = b.addLibrary(.{
         .name = "webkitgtk-6.0",
@@ -180,10 +209,38 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(jsc);
 
-    const compat_mod = b.createModule(.{ .root_source_file = b.path("compat/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    compat_mod.addIncludePath(b.path("compat"));
-    compat_mod.linkSystemLibrary("gtk4", .{});
-    b.installArtifact(b.addExecutable(.{ .name = "fotone-compat", .root_module = compat_mod, .use_llvm = true }));
+    const proxy3_mod = proxy3Module(b, target, optimize, out, engine_mod, platform);
+    const proxy3 = b.addLibrary(.{
+        .name = "webkit2gtk-4.1",
+        .linkage = .dynamic,
+        .version = .{ .major = 0, .minor = 0, .patch = 0 },
+        .root_module = proxy3_mod,
+        .use_llvm = true,
+    });
+    proxy3.setVersionScript(b.path("proxy/symbols3.map"));
+    b.installArtifact(proxy3);
+
+    const jsc3 = b.addLibrary(.{
+        .name = "javascriptcoregtk-4.1",
+        .linkage = .dynamic,
+        .version = .{ .major = 0, .minor = 0, .patch = 0 },
+        .root_module = jsc_mod,
+        .use_llvm = true,
+    });
+    b.installArtifact(jsc3);
+
+    for ([_]struct { name: []const u8, gtk: []const u8, gtk3: bool }{
+        .{ .name = "fotone-compat", .gtk = "gtk4", .gtk3 = false },
+        .{ .name = "fotone-compat3", .gtk = "gtk+-3.0", .gtk3 = true },
+    }) |v| {
+        const compat_mod = b.createModule(.{ .root_source_file = b.path("compat/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        compat_mod.addIncludePath(b.path("compat"));
+        compat_mod.linkSystemLibrary(v.gtk, .{});
+        const compat_options = b.addOptions();
+        compat_options.addOption(bool, "gtk3", v.gtk3);
+        compat_mod.addOptions("options", compat_options);
+        b.installArtifact(b.addExecutable(.{ .name = v.name, .root_module = compat_mod, .use_llvm = true }));
+    }
 
     const sandbox_mod = b.createModule(.{ .root_source_file = b.path("sandbox/main.zig"), .target = target, .optimize = optimize });
     const sandbox = b.addExecutable(.{ .name = "fotone-sandbox", .root_module = sandbox_mod });
@@ -202,10 +259,14 @@ pub fn build(b: *std.Build) void {
     const wt = b.addTest(.{ .root_module = wt_mod, .use_llvm = true });
     const pt_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out);
     pt_mod.addIncludePath(b.path("proxy"));
+    pt_mod.addImport("engine", engine_mod);
     pt_mod.linkLibrary(webview);
+    pt_mod.addOptions("options", flavor(b, false));
     const pt = b.addTest(.{ .root_module = pt_mod, .use_llvm = true });
+    const pt3 = b.addTest(.{ .root_module = proxy3Module(b, target, optimize, out, engine_mod, platform), .use_llvm = true });
     const test_step = b.step("test", "run tests");
     test_step.dependOn(&b.addRunArtifact(pt).step);
+    test_step.dependOn(&b.addRunArtifact(pt3).step);
     test_step.dependOn(&b.addRunArtifact(t).step);
     test_step.dependOn(&b.addRunArtifact(wt).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);

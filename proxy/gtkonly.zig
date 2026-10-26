@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
-const engine = @import("engine.zig");
+const engine = @import("engine");
+const options = @import("options");
 
 pub const ACTIONS = [_][]const u8{
     "NO_ACTION",              "OPEN_LINK",                "OPEN_LINK_IN_NEW_WINDOW", "DOWNLOAD_LINK_TO_DISK",
@@ -103,7 +104,12 @@ fn enumType(store: *c.GType, name: [*:0]const u8, values: [*c]const c.GEnumValue
 }
 
 var policy_type: c.GType = 0;
-const policy_values = [_]c.GEnumValue{
+const policy_values = if (options.gtk3) [_]c.GEnumValue{
+    .{ .value = 0, .value_name = "WEBKIT_HARDWARE_ACCELERATION_POLICY_ON_DEMAND", .value_nick = "on-demand" },
+    .{ .value = 1, .value_name = "WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS", .value_nick = "always" },
+    .{ .value = 2, .value_name = "WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER", .value_nick = "never" },
+    .{ .value = 0, .value_name = null, .value_nick = null },
+} else [_]c.GEnumValue{
     .{ .value = 0, .value_name = "WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS", .value_nick = "always" },
     .{ .value = 1, .value_name = "WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER", .value_nick = "never" },
     .{ .value = 0, .value_name = null, .value_nick = null },
@@ -316,7 +322,7 @@ export fn webkit_favicon_database_get_favicon(db: ?*c.GObject, _: [*c]const u8, 
     c.g_task_return_new_error(task, c.g_io_error_quark(), c.G_IO_ERROR_NOT_SUPPORTED, "favicons are available from webkit_web_view_get_favicon");
 }
 
-export fn webkit_favicon_database_get_favicon_finish(_: ?*c.GObject, res: ?*c.GAsyncResult, err: [*c][*c]c.GError) ?*c.GdkTexture {
+export fn webkit_favicon_database_get_favicon_finish(_: ?*c.GObject, res: ?*c.GAsyncResult, err: [*c][*c]c.GError) ?*anyopaque {
     return @ptrCast(@alignCast(c.g_task_propagate_pointer(@ptrCast(@alignCast(res)), err)));
 }
 
