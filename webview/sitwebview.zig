@@ -478,7 +478,10 @@ fn attach(w: *WebView) void {
     const d = display();
     if (w.web == null) w.web = @ptrCast(@alignCast(c.g_object_new(c.webkit_web_view_get_type(), "display", d, @as([*c]const u8, null))));
     sites.hook(w.web.?);
-    if (c.webkit_web_view_get_settings(w.web)) |st| c.webkit_settings_set_enable_encrypted_media(st, 1);
+    if (c.webkit_web_view_get_settings(w.web)) |st| {
+        c.webkit_settings_set_enable_encrypted_media(st, 1);
+        settings.enable(st);
+    }
     w.toplevel = c.wpe_display_create_toplevel(d, 1);
     w.view = c.webkit_web_view_get_wpe_view(w.web);
     if (w.view) |v| {

@@ -95,6 +95,21 @@ pub fn follow(display: *c.WPEDisplay) void {
     }
 }
 
+pub const features = [_][]const u8{"WebGPU"};
+
+pub fn enable(st: *c.WebKitSettings) void {
+    const list = c.webkit_settings_get_all_features() orelse return;
+    defer c.webkit_feature_list_unref(list);
+    var i: usize = 0;
+    while (i < c.webkit_feature_list_get_length(list)) : (i += 1) {
+        const f = c.webkit_feature_list_get(list, i);
+        const id = std.mem.span(c.webkit_feature_get_identifier(f) orelse continue);
+        for (features) |want| {
+            if (std.mem.eql(u8, id, want)) c.webkit_settings_set_feature_enabled(st, f, 1);
+        }
+    }
+}
+
 test "xft names map onto WPE settings" {
     try std.testing.expectEqual(@as(u8, c.WPE_SETTINGS_HINTING_STYLE_FULL), hinting("hintfull"));
     try std.testing.expectEqual(@as(u8, c.WPE_SETTINGS_HINTING_STYLE_SLIGHT), hinting(null));
