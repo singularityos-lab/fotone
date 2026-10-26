@@ -10,6 +10,7 @@ var window: ?*c.GtkWidget = null;
 var app_id: ?[*:0]const u8 = null;
 var rules: ?[*:0]const u8 = null;
 var view: ?*c.SitWebView = null;
+var translate = false;
 
 fn capture(_: c.gpointer) callconv(.c) c.gboolean {
     const win = window orelse return 0;
@@ -20,7 +21,9 @@ fn capture(_: c.gpointer) callconv(.c) c.gboolean {
 }
 
 fn loaded(_: ?*c.WebKitWebView, event: c.WebKitLoadEvent, _: c.gpointer) callconv(.c) void {
-    if (event == c.WEBKIT_LOAD_FINISHED and shot != null) _ = c.g_timeout_add(1500, capture, null);
+    if (event != c.WEBKIT_LOAD_FINISHED) return;
+    if (translate) c.sit_web_view_translate(view);
+    if (shot != null) _ = c.g_timeout_add(if (translate) 5000 else 1500, capture, null);
 }
 
 fn compiled(ok: c.gboolean, err: [*c]const c.GError, _: c.gpointer) callconv(.c) void {
@@ -72,6 +75,8 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, args[i], "--rules") and i + 1 < args.len) {
             rules = try arena.dupeZ(u8, args[i + 1]);
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--translate")) {
+            translate = true;
         } else uri = try arena.dupeZ(u8, args[i]);
     }
     const app = c.gtk_application_new(app_id orelse "dev.sinty.FotoneViewer", c.G_APPLICATION_NON_UNIQUE);

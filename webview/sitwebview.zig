@@ -16,9 +16,11 @@ const widevine = @import("widevine.zig");
 const sites = @import("sites.zig");
 const files = @import("files.zig");
 const authn = @import("authn.zig");
+const pagetr = @import("translate.zig");
 
 comptime {
     _ = authn;
+    _ = pagetr;
 }
 
 pub const WebView = extern struct {
@@ -550,7 +552,7 @@ fn contextMenu(web: ?*c.WebKitWebView, menu: ?*c.WebKitContextMenu, hit: ?*c.Web
     const uri = if (link != null) link else c.webkit_web_view_get_uri(web);
     const selected = if (hit) |h| c.webkit_hit_test_result_context_is_selection(h) != 0 else false;
     const editable = if (hit) |h| c.webkit_hit_test_result_context_is_editable(h) != 0 else false;
-    return @intFromBool(ui.contextMenu(widget(w), menu orelse return 0, w.last_x, w.last_y, uri, if (selected) web else null, if (editable) web else null));
+    return @intFromBool(ui.contextMenu(widget(w), menu orelse return 0, w.last_x, w.last_y, uri, if (selected) web else null, if (editable) web else null, if (!selected and !editable and link == null) web else null));
 }
 
 fn fullscreened(win: ?*c.GtkWindow, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c) void {
@@ -760,6 +762,10 @@ pub export fn sit_web_view_remove_rule_set(id: [*:0]const u8) void {
     dnr.remove(id);
 }
 
+pub export fn sit_web_view_translate(self: *WebView) void {
+    pagetr.page(self.web orelse return);
+}
+
 pub export fn sit_web_view_load_uri(self: *WebView, uri: [*c]const u8) void {
     if (self.web) |p| c.webkit_web_view_load_uri(p, uri);
 }
@@ -781,6 +787,7 @@ test {
     _ = widevine;
     _ = sites;
     _ = authn;
+    _ = pagetr;
 }
 
 test "gestures clamp zoom and need a long swipe" {

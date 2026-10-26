@@ -4,6 +4,7 @@ const nearby = @import("nearby.zig");
 const capabilities = @import("capabilities.zig");
 const contacts = @import("contacts.zig");
 const perms = @import("perms.zig");
+const translate_page = @import("translate.zig");
 
 fn tr(s: [*:0]const u8) [*c]const u8 {
     return c.g_dgettext("gtk40", s);
@@ -389,6 +390,23 @@ fn translate(_: ?*c.GSimpleAction, _: ?*c.GVariant, data: c.gpointer) callconv(.
     c.webkit_web_view_evaluate_javascript(web, "window.getSelection().toString()", -1, "fotone-translate", null, null, selectionRead, null);
 }
 
+fn translatePage(_: ?*c.GSimpleAction, _: ?*c.GVariant, data: c.gpointer) callconv(.c) void {
+    translate_page.page(@ptrCast(@alignCast(data)));
+}
+
+fn addTranslatePage(group: *c.GSimpleActionGroup, model: *c.GMenu, web: ?*c.WebKitWebView) void {
+    const v = web orelse return;
+    if (!translate_page.available()) return;
+    const action = c.g_simple_action_new("translate-page", null);
+    defer c.g_object_unref(action);
+    _ = c.g_signal_connect_data(action, "activate", @ptrCast(&translatePage), v, null, 0);
+    c.g_action_map_add_action(@ptrCast(group), @ptrCast(action));
+    const section = c.g_menu_new();
+    defer c.g_object_unref(section);
+    c.g_menu_append(section, c.g_dgettext("fotone", "Translate Page"), "ctx.translate-page");
+    c.g_menu_append_section(model, null, @ptrCast(@alignCast(section)));
+}
+
 fn addTranslate(group: *c.GSimpleActionGroup, model: *c.GMenu, web: ?*c.WebKitWebView) void {
     const v = web orelse return;
     const p = capabilities.find(capabilities.TRANSLATE) orelse return;
@@ -434,7 +452,7 @@ fn addContacts(group: *c.GSimpleActionGroup, model: *c.GMenu, web: ?*c.WebKitWeb
     c.g_menu_append_section(model, null, @ptrCast(@alignCast(section)));
 }
 
-pub fn contextMenu(w: *c.GtkWidget, menu: *c.WebKitContextMenu, x: f64, y: f64, uri: [*c]const u8, selection: ?*c.WebKitWebView, editable: ?*c.WebKitWebView) bool {
+pub fn contextMenu(w: *c.GtkWidget, menu: *c.WebKitContextMenu, x: f64, y: f64, uri: [*c]const u8, selection: ?*c.WebKitWebView, editable: ?*c.WebKitWebView, page: ?*c.WebKitWebView) bool {
     if (c.webkit_context_menu_get_n_items(menu) == 0) return false;
     const group = c.g_simple_action_group_new().?;
     defer c.g_object_unref(group);
@@ -442,6 +460,7 @@ pub fn contextMenu(w: *c.GtkWidget, menu: *c.WebKitContextMenu, x: f64, y: f64, 
     defer c.g_object_unref(model);
     addItems(group, model, c.webkit_context_menu_get_items(menu));
     addTranslate(group, model, selection);
+    addTranslatePage(group, model, page);
     addContacts(group, model, editable);
     addNearby(group, model, if (editable == null) uri else null);
     c.gtk_widget_insert_action_group(w, "ctx", @ptrCast(group));
