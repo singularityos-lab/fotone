@@ -259,6 +259,15 @@ pub fn build(b: *std.Build) void {
     const perf = b.addExecutable(.{ .name = "fotone-perf", .root_module = perf_mod });
     b.installArtifact(perf);
 
+    const h3_mod = b.createModule(.{ .root_source_file = b.path("net/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    h3_mod.addIncludePath(b.path("net"));
+    h3_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/libngtcp2_crypto_gnutls.a" });
+    h3_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/libngtcp2.a" });
+    h3_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/libnghttp3.a" });
+    h3_mod.linkSystemLibrary("gnutls", .{});
+    const h3 = b.addExecutable(.{ .name = "fotone-h3", .root_module = h3_mod });
+    b.installArtifact(h3);
+
     const engine_mod = b.createModule(.{ .root_source_file = b.path("engine/engine.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
     engine_mod.addIncludePath(b.path("engine"));
     engine_mod.linkSystemLibrary("gobject-2.0", .{});
@@ -357,4 +366,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bump_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = perf_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_mod })).step);
 }
