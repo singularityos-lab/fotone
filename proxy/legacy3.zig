@@ -393,9 +393,10 @@ var settings_base: Accessors = .{};
 var decision_base: Accessors = .{};
 var context_base: Accessors = .{};
 
-fn baseOf(id: c.guint) *Accessors {
-    if (id >= FIRST_CONTEXT) return &context_base;
-    if (id >= FIRST_DECISION) return &decision_base;
+fn baseOf(o: [*c]c.GObject) *Accessors {
+    const t = o.*.g_type_instance.g_class.*.g_type;
+    if (c.g_type_is_a(t, c.webkit_web_context_get_type()) != 0) return &context_base;
+    if (c.g_type_is_a(t, c.webkit_navigation_policy_decision_get_type()) != 0) return &decision_base;
     return &settings_base;
 }
 
@@ -450,13 +451,13 @@ fn extraGet(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, spec: [*c]c.GPar
     if (settingIndex(id)) |l| return c.g_value_set_boolean(value, settingGet(l, o));
     if (id >= FIRST_CONTEXT and id < FIRST_CONTEXT + context_props.len) return contextGet(id, o, value);
     if (id >= FIRST_DECISION and id < FIRST_DECISION + decision_props.len) return decisionGet(id, o, value);
-    if (baseOf(id).get) |f| f(o, id, value, spec);
+    if (baseOf(o).get) |f| f(o, id, value, spec);
 }
 
 fn extraSet(o: [*c]c.GObject, id: c.guint, value: [*c]const c.GValue, spec: [*c]c.GParamSpec) callconv(.c) void {
     if (settingIndex(id)) |l| return settingSet(l, o, c.g_value_get_boolean(value));
     if (id >= FIRST_CONTEXT and id < FIRST_CONTEXT + context_props.len) return contextSet(id, o, value);
-    if (baseOf(id).set) |f| f(o, id, value, spec);
+    if (baseOf(o).set) |f| f(o, id, value, spec);
 }
 
 fn extend(t: c.GType, base: *Accessors) *c.GObjectClass {

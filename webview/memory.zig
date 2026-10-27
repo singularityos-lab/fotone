@@ -4,6 +4,7 @@ const c = @import("c.zig").c;
 pub const idle_us: i64 = 5 * 60 * std.time.us_per_s;
 pub const forced_us: i64 = 30 * 60 * std.time.us_per_s;
 pub const pressure_limit: f64 = 10.0;
+pub const freeze_us: i64 = 30 * std.time.us_per_s;
 
 pub fn parsePressure(text: []const u8) ?f64 {
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
@@ -58,6 +59,16 @@ pub fn budget() usize {
 pub fn shouldSleep(hidden_for: i64, current_pressure: f64) bool {
     if (hidden_for >= forced_us) return true;
     return hidden_for >= idle_us and current_pressure >= pressure_limit;
+}
+
+pub fn shouldFreeze(hidden_for: i64, busy: bool) bool {
+    return !busy and hidden_for >= freeze_us;
+}
+
+test "hidden views freeze after a short grace unless busy" {
+    try std.testing.expect(!shouldFreeze(freeze_us - 1, false));
+    try std.testing.expect(shouldFreeze(freeze_us, false));
+    try std.testing.expect(!shouldFreeze(forced_us, true));
 }
 
 test "pressure reads the some avg10 field" {

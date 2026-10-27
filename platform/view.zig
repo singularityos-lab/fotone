@@ -3,6 +3,7 @@ const c = @import("c.zig").c;
 const g = @import("gobject.zig");
 
 pub const FrameFunc = ?*const fn (?*c.WPEView, ?*c.WPEBuffer, c.gpointer) callconv(.c) void;
+pub const CursorFunc = ?*const fn (?*c.WPEView, [*c]const u8, ?*c.GBytes, c.guint, c.guint, c.guint, c.guint, c.guint, c.gpointer) callconv(.c) void;
 pub const AccessibleFunc = ?*const fn (?*c.WPEView, [*c]const u8, c.gpointer) callconv(.c) void;
 
 pub const View = extern struct {
@@ -19,6 +20,8 @@ pub const View = extern struct {
     a11y_destroy: c.GDestroyNotify,
     damage: [max_damage]c.WPERectangle,
     n_damage: c.guint,
+    cursor_func: CursorFunc,
+    cursor_data: c.gpointer,
 };
 
 const max_damage = 16;
@@ -155,6 +158,16 @@ fn renderBuffer(view: [*c]c.WPEView, buffer: [*c]c.WPEBuffer, rects: [*c]const c
     return 1;
 }
 
+fn setCursorFromName(view: [*c]c.WPEView, name: [*c]const u8) callconv(.c) void {
+    const v = of(view);
+    if (v.cursor_func) |f| f(view, name, null, 0, 0, 0, 0, 0, v.cursor_data);
+}
+
+fn setCursorFromBytes(view: [*c]c.WPEView, bytes: ?*c.GBytes, width: c.guint, height: c.guint, stride: c.guint, x: c.guint, y: c.guint) callconv(.c) void {
+    const v = of(view);
+    if (v.cursor_func) |f| f(view, null, bytes, width, height, stride, x, y, v.cursor_data);
+}
+
 fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     parent_class = @ptrCast(@alignCast(c.g_type_class_peek_parent(klass)));
     const oc = g.objectClass(klass);
@@ -163,6 +176,8 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     const vc: *c.WPEViewClass = @ptrCast(@alignCast(klass));
     vc.render_buffer = renderBuffer;
     vc.get_accessible = getAccessible;
+    vc.set_cursor_from_name = setCursorFromName;
+    vc.set_cursor_from_bytes = setCursorFromBytes;
 }
 
 pub export fn fotone_view_get_type() c.GType {
@@ -194,6 +209,12 @@ pub export fn fotone_view_set_accessible_func(view: [*c]c.WPEView, func: Accessi
     v.a11y_data = data;
     v.a11y_destroy = destroy;
     if (v.plug != null) if (func) |f| f(view, v.plug, data);
+}
+
+pub export fn fotone_view_set_cursor_func(view: [*c]c.WPEView, func: CursorFunc, data: c.gpointer) void {
+    const v = of(view);
+    v.cursor_func = func;
+    v.cursor_data = data;
 }
 
 pub export fn fotone_view_get_accessible_plug(view: [*c]c.WPEView) [*c]const u8 {

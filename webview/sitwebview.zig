@@ -47,7 +47,12 @@ pub const WebView = extern struct {
     passwords: c.gboolean,
     surface: ?*c.GdkSurface,
     rescale: c.gulong,
+    nudge: c.guint,
+    frozen: c.gboolean,
+    asking: c.gboolean,
 };
+
+extern fn webkit_fotone_web_view_set_suspended(web: ?*c.WebKitWebView, suspended: c.gboolean) void;
 
 const Class = extern struct {
     parent: c.GtkWidgetClass,
@@ -198,12 +203,52 @@ fn frame(view: ?*c.WPEView, buffer: ?*c.WPEBuffer, data: c.gpointer) callconv(.c
     w.texture = t;
     w.fresh = 1;
     c.gtk_widget_queue_draw(widget(w));
+    if (w.nudge == 0) w.nudge = c.g_timeout_add(late_present_ms, presentLate, w);
+}
+
+const late_present_ms = 100;
+
+fn presentLate(data: c.gpointer) callconv(.c) c.gboolean {
+    const w = of(data);
+    w.nudge = 0;
+    if (w.fresh != 0) {
+        w.fresh = 0;
+        if (w.view) |v| c.fotone_view_frame_presented(v);
+    }
+    return 0;
+}
+
+fn cancelNudge(w: *WebView) void {
+    if (w.nudge != 0) _ = c.g_source_remove(w.nudge);
+    w.nudge = 0;
+}
+
+fn cursorChanged(_: ?*c.WPEView, name: [*c]const u8, bytes: ?*c.GBytes, width: c.guint, height: c.guint, stride: c.guint, x: c.guint, y: c.guint, data: c.gpointer) callconv(.c) void {
+    const wd = widget(of(data));
+    if (name != null) {
+        c.gtk_widget_set_cursor_from_name(wd, if (std.mem.eql(u8, std.mem.span(name), "default")) null else name);
+        return;
+    }
+    const b = bytes orelse return;
+    const builder = c.gdk_memory_texture_builder_new();
+    defer c.g_object_unref(builder);
+    c.gdk_memory_texture_builder_set_width(builder, @intCast(width));
+    c.gdk_memory_texture_builder_set_height(builder, @intCast(height));
+    c.gdk_memory_texture_builder_set_format(builder, c.GDK_MEMORY_B8G8R8A8_PREMULTIPLIED);
+    c.gdk_memory_texture_builder_set_bytes(builder, b);
+    c.gdk_memory_texture_builder_set_stride(builder, stride);
+    const t = c.gdk_memory_texture_builder_build(builder) orelse return;
+    defer c.g_object_unref(t);
+    const cursor = c.gdk_cursor_new_from_texture(t, @intCast(x), @intCast(y), null);
+    defer c.g_object_unref(cursor);
+    c.gtk_widget_set_cursor(wd, cursor);
 }
 
 fn afterPaint(_: ?*c.GdkFrameClock, data: c.gpointer) callconv(.c) void {
     const w = of(data);
     if (w.fresh == 0) return;
     w.fresh = 0;
+    cancelNudge(w);
     if (w.view) |v| c.fotone_view_frame_presented(v);
 }
 
@@ -277,6 +322,42 @@ fn submitForm(web: ?*c.WebKitWebView, req: ?*c.WebKitFormSubmissionRequest, data
     passwords.submitted(web orelse return, req orelse return, ui.windowOf(widget(w)));
 }
 
+fn busy(w: *WebView) bool {
+    const web = w.web orelse return true;
+    if (perms.appOf(web) != null) return true;
+    if (c.webkit_web_view_is_playing_audio(web) != 0) return true;
+    if (c.webkit_web_view_get_camera_capture_state(web) != c.WEBKIT_MEDIA_CAPTURE_STATE_NONE) return true;
+    if (c.webkit_web_view_get_microphone_capture_state(web) != c.WEBKIT_MEDIA_CAPTURE_STATE_NONE) return true;
+    return c.webkit_web_view_get_display_capture_state(web) != c.WEBKIT_MEDIA_CAPTURE_STATE_NONE;
+}
+
+fn freezeRead(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv(.c) void {
+    const w = of(data);
+    w.asking = 0;
+    defer c.g_object_unref(w);
+    const v = c.webkit_web_view_evaluate_javascript_finish(@ptrCast(@alignCast(src)), res, null) orelse return;
+    defer c.g_object_unref(v);
+    const text = c.jsc_value_to_string(v);
+    defer c.g_free(text);
+    if (text != null and std.mem.eql(u8, std.mem.span(text), "granted")) return;
+    if (w.hidden_at == 0 or busy(w)) return;
+    w.frozen = 1;
+    webkit_fotone_web_view_set_suspended(w.web, 1);
+}
+
+fn freeze(w: *WebView) void {
+    if (w.frozen != 0 or w.asking != 0 or w.state != null) return;
+    w.asking = 1;
+    _ = c.g_object_ref(w);
+    c.webkit_web_view_evaluate_javascript(w.web, "typeof Notification === 'undefined' ? 'none' : Notification.permission", -1, null, null, null, freezeRead, w);
+}
+
+fn thaw(w: *WebView) void {
+    if (w.frozen == 0) return;
+    w.frozen = 0;
+    webkit_fotone_web_view_set_suspended(w.web, 0);
+}
+
 fn check(_: c.gpointer) callconv(.c) c.gboolean {
     const list = views orelse return 1;
     const now = c.g_get_monotonic_time();
@@ -285,12 +366,16 @@ fn check(_: c.gpointer) callconv(.c) c.gboolean {
     var i: c.guint = 0;
     while (i < list.*.len) : (i += 1) {
         const w = of(list.*.pdata[i]);
-        if (w.hidden_at > 0 and memory.shouldSleep(now - w.hidden_at, p)) sleep(w);
+        if (w.hidden_at > 0 and memory.shouldSleep(now - w.hidden_at, p)) {
+            thaw(w);
+            sleep(w);
+        } else if (w.hidden_at > 0 and memory.shouldFreeze(now - w.hidden_at, busy(w))) freeze(w);
         if (w.state == null) awake += 1;
     }
     const limit = memory.budget();
     while (awake > limit) : (awake -= 1) {
         const oldest = oldestHidden(list) orelse break;
+        thaw(oldest);
         sleep(oldest);
         if (oldest.state == null) break;
     }
@@ -318,6 +403,7 @@ fn map(wd: [*c]c.GtkWidget) callconv(.c) void {
     parent_class.?.map.?(wd);
     const w = of(wd);
     w.hidden_at = 0;
+    thaw(w);
     wake(w);
     w.clock = c.gtk_widget_get_frame_clock(wd);
     if (w.clock) |k| w.paint = c.g_signal_connect_data(k, "after-paint", @ptrCast(&afterPaint), w, null, 0);
@@ -536,6 +622,7 @@ fn attach(w: *WebView) void {
     if (w.view) |v| {
         c.fotone_view_set_frame_func(v, frame, w, null);
         c.fotone_view_set_accessible_func(v, a11y.plugged, w, null);
+        c.fotone_view_set_cursor_func(v, cursorChanged, w);
     }
     _ = c.g_signal_connect_data(w.web, "load-changed", @ptrCast(&loadChanged), w, null, 0);
     const after = c.G_CONNECT_AFTER;
@@ -676,6 +763,7 @@ fn getProperty(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, _: ?*c.GParam
 
 fn dispose(o: [*c]c.GObject) callconv(.c) void {
     const w = of(o);
+    cancelNudge(w);
     if (views) |list| _ = c.g_ptr_array_remove(list, w);
     a11y.clear(widget(w));
     if (w.state) |st| c.webkit_web_view_session_state_unref(st);
@@ -683,6 +771,7 @@ fn dispose(o: [*c]c.GObject) callconv(.c) void {
     if (w.view) |v| {
         c.fotone_view_set_frame_func(v, null, null, null);
         c.fotone_view_set_accessible_func(v, null, null, null);
+        c.fotone_view_set_cursor_func(v, null, null);
         c.wpe_view_set_toplevel(v, null);
     }
     w.view = null;

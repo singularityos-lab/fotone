@@ -7,6 +7,7 @@ G_BEGIN_DECLS
 
 typedef void (*FotoneFrameFunc) (WPEView *view, WPEBuffer *buffer, gpointer user_data);
 typedef void (*FotoneAccessibleFunc) (WPEView *view, const char *plug_id, gpointer user_data);
+typedef void (*FotoneCursorFunc) (WPEView *view, const char *name, GBytes *bytes, guint width, guint height, guint stride, guint hotspot_x, guint hotspot_y, gpointer user_data);
 typedef gboolean (*FotoneFullscreenFunc) (WPEToplevel *toplevel, gboolean fullscreen, gpointer user_data);
 
 GType        fotone_display_get_type        (void);
@@ -31,6 +32,9 @@ void         fotone_view_set_accessible_func (WPEView             *view,
                                               gpointer             user_data,
                                               GDestroyNotify       destroy);
 const char  *fotone_view_get_accessible_plug (WPEView             *view);
+void         fotone_view_set_cursor_func     (WPEView             *view,
+                                              FotoneCursorFunc     func,
+                                              gpointer             user_data);
 
 void         fotone_toplevel_configure      (WPEToplevel    *toplevel,
                                              int             width,

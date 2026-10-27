@@ -213,12 +213,11 @@ var settings_base: Accessors = .{};
 var window_base: Accessors = .{};
 var chooser_base: Accessors = .{};
 
-fn baseOf(id: c.guint) *Accessors {
-    return switch (id) {
-        PROP_GESTURES, PROP_POLICY => &settings_base,
-        PROP_GEOMETRY => &window_base,
-        else => &chooser_base,
-    };
+fn baseOf(o: [*c]c.GObject) *Accessors {
+    const t = o.*.g_type_instance.g_class.*.g_type;
+    if (settings_once != 0 and c.g_type_is_a(t, webkit_settings_get_type()) != 0) return &settings_base;
+    if (window_once != 0 and c.g_type_is_a(t, webkit_window_properties_get_type()) != 0) return &window_base;
+    return &chooser_base;
 }
 
 fn extraGet(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, spec: [*c]c.GParamSpec) callconv(.c) void {
@@ -231,7 +230,7 @@ fn extraGet(o: [*c]c.GObject, id: c.guint, value: [*c]c.GValue, spec: [*c]c.GPar
             c.g_value_set_boxed(value, &r);
         },
         PROP_FILTER => c.g_value_take_object(value, webkit_file_chooser_request_get_mime_types_filter(o)),
-        else => if (baseOf(id).get) |f| f(o, id, value, spec),
+        else => if (baseOf(o).get) |f| f(o, id, value, spec),
     }
 }
 
@@ -244,7 +243,7 @@ fn extraSet(o: [*c]c.GObject, id: c.guint, value: [*c]const c.GValue, spec: [*c]
             copy.* = @as(*const c.GdkRectangle, @ptrCast(@alignCast(b))).*;
             c.g_object_set_data_full(o, GEOMETRY, copy, c.g_free);
         },
-        else => if (baseOf(id).set) |f| f(o, id, value, spec),
+        else => if (baseOf(o).set) |f| f(o, id, value, spec),
     }
 }
 

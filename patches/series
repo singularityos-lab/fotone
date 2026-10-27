@@ -12,3 +12,4 @@ fotone 0011-web-authn-non-cocoa-build.patch
 fotone 0012-webdriver-and-gpu-build-fixes.patch
 fotone 0013-scroll-aware-tile-coverage.patch
 fotone 0014-script-bytecode-disk-cache.patch
+fotone 0015-web-view-suspend.patch
