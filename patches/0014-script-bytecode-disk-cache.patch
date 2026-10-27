@@ -1,0 +1,141 @@
+--- a/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
++++ b/Source/WebCore/bindings/js/CachedScriptSourceProvider.h
+@@ -29,7 +29,18 @@
+ #include "CachedResourceHandle.h"
+ #include "CachedScript.h"
+ #include "CachedScriptFetcher.h"
++#include <JavaScriptCore/BytecodeCacheError.h>
++#include <JavaScriptCore/CachedBytecode.h>
++#include <JavaScriptCore/CachedTypes.h>
+ #include <JavaScriptCore/SourceProvider.h>
++#include <JavaScriptCore/UnlinkedFunctionExecutable.h>
++#include <wtf/FileHandle.h>
++#include <wtf/FileSystem.h>
++#include <wtf/Scope.h>
++#include <wtf/ProcessID.h>
++
++extern "C" __attribute__((weak)) size_t fotone_bytecode_cache_path(const char* url, size_t urlLength, unsigned hash, unsigned length, char* path, size_t pathSize);
++extern "C" __attribute__((weak)) void fotone_bytecode_cache_count(int hit);
+ 
+ namespace WebCore {
+ 
+@@ -40,9 +51,71 @@
+ 
+     virtual ~CachedScriptSourceProvider()
+     {
++        commitCachedBytecode();
+         protect(m_cachedScript)->removeClient(*this);
+     }
+ 
++    RefPtr<JSC::CachedBytecode> cachedBytecode() const final
++    {
++        if (!m_cachedBytecode && !m_loaded) {
++            m_loaded = true;
++            loadBytecode();
++            if (fotone_bytecode_cache_count && !cachePath().isNull())
++                fotone_bytecode_cache_count(m_cachedBytecode ? 1 : 0);
++        }
++        return m_cachedBytecode.copyRef();
++    }
++
++    void updateCache(const JSC::UnlinkedFunctionExecutable* executable, const JSC::SourceCode&, JSC::CodeSpecializationKind kind, const JSC::UnlinkedFunctionCodeBlock* codeBlock) const final
++    {
++        if (!m_cachedBytecode)
++            return;
++        JSC::BytecodeCacheError error;
++        RefPtr<JSC::CachedBytecode> cachedBytecode = JSC::encodeFunctionCodeBlock(executable->vm(), codeBlock, error);
++        if (cachedBytecode && !error.isValid())
++            m_cachedBytecode->addFunctionUpdate(executable, kind, *cachedBytecode);
++    }
++
++    void cacheBytecode(const JSC::BytecodeCacheGenerator& generator) const final
++    {
++        if (cachePath().isNull())
++            return;
++        if (!m_cachedBytecode)
++            m_cachedBytecode = JSC::CachedBytecode::create();
++        auto update = generator();
++        if (!update)
++            return;
++        m_cachedBytecode->addGlobalUpdate(*update);
++        commitCachedBytecode();
++    }
++
++    void commitCachedBytecode() const final
++    {
++        if (!m_cachedBytecode || !m_cachedBytecode->hasUpdates())
++            return;
++        auto clearBytecode = makeScopeExit([&] {
++            m_cachedBytecode = nullptr;
++        });
++        String filename = cachePath();
++        if (filename.isNull())
++            return;
++        auto current = FileSystem::fileSize(filename);
++        if (current.value_or(0) != m_cachedBytecode->size())
++            return;
++        String temporary = makeString(filename, '.', getCurrentProcessID());
++        auto handle = FileSystem::openFile(temporary, FileSystem::FileOpenMode::Truncate, FileSystem::FileAccessPermission::User);
++        if (!handle)
++            return;
++        bool written = !m_cachedBytecode->size() || handle.write(m_cachedBytecode->span()) == m_cachedBytecode->size();
++        written = written && handle.truncate(m_cachedBytecode->sizeForUpdate());
++        m_cachedBytecode->commitUpdates([&] (off_t offset, std::span<const uint8_t> data) {
++            written = written && handle.seek(offset, FileSystem::FileSeekOrigin::Beginning) && handle.write(data) == data.size();
++        });
++        handle = { };
++        if (!written || !FileSystem::moveFile(temporary, filename))
++            FileSystem::deleteFile(temporary);
++    }
++
+     // CachedResourceClient.
+     void ref() const final { JSC::SourceProvider::ref(); }
+     void deref() const final { JSC::SourceProvider::deref(); }
+@@ -57,6 +130,36 @@
+     }
+ 
+ private:
++    String cachePath() const
++    {
++        if (!m_pathResolved) {
++            m_pathResolved = true;
++            if (!fotone_bytecode_cache_path || protect(m_cachedScript)->sessionID().isEphemeral() || sourceTaintedOrigin() != JSC::SourceTaintedOrigin::Untainted)
++                return m_cachePath;
++            auto url = sourceURL().utf8();
++            auto text = source();
++            char path[4096];
++            size_t length = fotone_bytecode_cache_path(url.data(), url.length(), hash(), text.length(), path, sizeof(path));
++            if (length && length < sizeof(path))
++                m_cachePath = String::fromUTF8(std::span { path, length });
++        }
++        return m_cachePath;
++    }
++
++    void loadBytecode() const
++    {
++        String filename = cachePath();
++        if (filename.isNull())
++            return;
++        auto handle = FileSystem::openFile(filename, FileSystem::FileOpenMode::Read, FileSystem::FileAccessPermission::User, { FileSystem::FileLockMode::Shared, FileSystem::FileLockMode::Nonblocking });
++        if (!handle)
++            return;
++        auto mappedFileData = handle.map(FileSystem::MappedFileMode::Private);
++        if (!mappedFileData)
++            return;
++        m_cachedBytecode = JSC::CachedBytecode::create(WTF::move(*mappedFileData));
++    }
++
+     CachedScriptSourceProvider(CachedScript* cachedScript, JSC::SourceProviderSourceType sourceType, Ref<CachedScriptFetcher>&& scriptFetcher)
+         : SourceProvider(JSC::SourceOrigin { cachedScript->response().url(), WTF::move(scriptFetcher) }, String(cachedScript->response().url().string()), cachedScript->response().isRedirected() ? String(cachedScript->url().string()) : String(), cachedScript->requiresPrivacyProtections() ? JSC::SourceTaintedOrigin::KnownTainted : JSC::SourceTaintedOrigin::Untainted, TextPosition(), sourceType)
+         , m_cachedScript(cachedScript)
+@@ -65,6 +168,10 @@
+     }
+ 
+     const CachedResourceHandle<CachedScript> m_cachedScript;
++    mutable RefPtr<JSC::CachedBytecode> m_cachedBytecode;
++    mutable String m_cachePath;
++    mutable bool m_pathResolved { false };
++    mutable bool m_loaded { false };
+ };
+ 
+ inline unsigned CachedScriptSourceProvider::hash() const
