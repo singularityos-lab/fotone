@@ -39,6 +39,7 @@ const system_ro = [_][]const u8{ "/usr", "/etc", "/opt", "/lib", "/lib64", "/bin
 const system_rw = [_][]const u8{ "/dev/dri", "/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/shm", "/dev/udmabuf", "/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-modeset", "/dev/nvidia-uvm" };
 const home_ro = [_][]const u8{ ".local/share/fonts", ".fonts", ".config/fontconfig" };
 const home_rw = [_][]const u8{ ".cache/fontconfig", ".cache/gstreamer-1.0", ".local/share/fotone/widevine" };
+const shader_caches = [_][]const u8{ "mesa_shader_cache", "mesa_shader_cache_db", "nvidia" };
 
 fn abi() u32 {
     const r = linux.syscall3(.landlock_create_ruleset, 0, 0, CREATE_RULESET_VERSION);
@@ -207,6 +208,13 @@ pub fn main(init: std.process.Init) !u8 {
         for (home_ro) |p| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ home, p }), .mode = .ro });
         for (home_rw) |p| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ home, p }), .mode = .rw });
     }
+    const cache_home = if (init.environ_map.get("XDG_CACHE_HOME")) |d| d else if (init.environ_map.get("HOME")) |home| try std.fs.path.join(gpa, &.{ home, ".cache" }) else null;
+    if (cache_home) |base| for (shader_caches) |name| {
+        _ = linux.mkdir(try gpa.dupeZ(u8, base), 0o700);
+        const dir = try std.fs.path.joinZ(gpa, &.{ base, name });
+        _ = linux.mkdir(dir, 0o700);
+        try paths.append(gpa, .{ .path = dir, .mode = .rw });
+    };
     if (init.environ_map.get("XDG_DATA_HOME")) |d| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ d, "fotone", "widevine" }), .mode = .rw });
     if (init.environ_map.get("LD_LIBRARY_PATH")) |ld| {
         var it = std.mem.tokenizeScalar(u8, ld, ':');
