@@ -253,6 +253,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run.addArgs(a);
     b.step("run", "open a page in the viewer").dependOn(&run.step);
 
+    const perf_mod = b.createModule(.{ .root_source_file = b.path("perf/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    perf_mod.addIncludePath(b.path("perf"));
+    perf_mod.linkSystemLibrary("glib-2.0", .{});
+    const perf = b.addExecutable(.{ .name = "fotone-perf", .root_module = perf_mod });
+    b.installArtifact(perf);
+
     const engine_mod = b.createModule(.{ .root_source_file = b.path("engine/engine.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
     engine_mod.addIncludePath(b.path("engine"));
     engine_mod.linkSystemLibrary("gobject-2.0", .{});
@@ -350,4 +356,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = webgpu_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bump_mod, .use_llvm = true })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = perf_mod })).step);
 }

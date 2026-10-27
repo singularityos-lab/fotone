@@ -13,6 +13,11 @@ var view: ?*c.SitWebView = null;
 var translate = false;
 var extension: ?[*:0]const u8 = null;
 var dump = false;
+var perf = false;
+var perf_polls: u32 = 0;
+
+const PERF_POLL_MS = 200;
+const PERF_LIMIT = 100;
 
 fn capture(_: c.gpointer) callconv(.c) c.gboolean {
     const win = window orelse return 0;
@@ -41,10 +46,38 @@ fn readText(_: c.gpointer) callconv(.c) c.gboolean {
     return 0;
 }
 
+fn perfRead(src: [*c]c.GObject, res: ?*c.GAsyncResult, _: c.gpointer) callconv(.c) void {
+    var err: [*c]c.GError = null;
+    const value = c.webkit_web_view_evaluate_javascript_finish(@ptrCast(@alignCast(src)), res, &err) orelse {
+        c.g_error_free(err);
+        perf_polls += 1;
+        if (perf_polls < PERF_LIMIT) _ = c.g_timeout_add(PERF_POLL_MS, perfPoll, null) else if (window) |win| c.gtk_window_destroy(@ptrCast(win));
+        return;
+    };
+    defer c.g_object_unref(value);
+    const text = c.jsc_value_to_string(value);
+    defer c.g_free(text);
+    if (std.mem.len(text) == 0) {
+        perf_polls += 1;
+        if (perf_polls < PERF_LIMIT) {
+            _ = c.g_timeout_add(PERF_POLL_MS, perfPoll, null);
+            return;
+        }
+        std.log.warn("fotone-viewer: the page reported no measurements", .{});
+    } else c.g_print("%s\n", text);
+    if (window) |win| c.gtk_window_destroy(@ptrCast(win));
+}
+
+fn perfPoll(_: c.gpointer) callconv(.c) c.gboolean {
+    c.webkit_web_view_evaluate_javascript(c.sit_web_view_get_web_view(view), "document.body.dataset.perf || ''", -1, null, null, null, perfRead, null);
+    return 0;
+}
+
 fn loaded(_: ?*c.WebKitWebView, event: c.WebKitLoadEvent, _: c.gpointer) callconv(.c) void {
     if (event != c.WEBKIT_LOAD_FINISHED) return;
     if (translate) c.sit_web_view_translate(view);
     if (dump) _ = c.g_timeout_add(3000, readText, null);
+    if (perf) _ = c.g_timeout_add(PERF_POLL_MS, perfPoll, null);
     if (shot != null) _ = c.g_timeout_add(if (translate) 5000 else 1500, capture, null);
 }
 
@@ -110,6 +143,8 @@ pub fn main(init: std.process.Init) !u8 {
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--dump")) {
             dump = true;
+        } else if (std.mem.eql(u8, args[i], "--perf")) {
+            perf = true;
         } else if (std.mem.eql(u8, args[i], "--translate")) {
             translate = true;
         } else uri = try arena.dupeZ(u8, args[i]);

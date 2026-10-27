@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>dom</title></head>
+<body><script>
+const t0 = performance.now();
+const root = document.createElement("div");
+for (let i = 0; i < 20000; i++) {
+    const e = document.createElement("div");
+    e.className = "item i" + (i % 13);
+    e.textContent = "item " + i;
+    root.appendChild(e);
+}
+document.body.appendChild(root);
+document.body.offsetHeight;
+const style = document.createElement("style");
+style.textContent = ".item { padding: 2px; } .i3 { font-weight: bold; } .i7 { margin-left: 4px; }";
+document.head.appendChild(style);
+document.body.offsetHeight;
+const dom = performance.now() - t0;
+setTimeout(() => { document.body.dataset.perf = JSON.stringify({ dom_ms: dom }); });
+</script></body></html>

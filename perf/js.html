@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>js</title>
+<script>window.perfStart = performance.now();</script>
+<script src="bundle.js"></script>
+<script>window.perfScript = performance.now() - window.perfStart;</script>
+</head>
+<body><script>
+setTimeout(() => { document.body.dataset.perf = JSON.stringify({ js_ms: window.perfScript, checksum: window.perfChecksum }); });
+</script></body></html>

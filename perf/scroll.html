@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>scroll</title>
+<style>
+body { margin: 0; font: 15px sans-serif; }
+.row { display: flex; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #ddd; align-items: center; }
+.dot { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, #4a7, #27a); box-shadow: 0 2px 6px rgba(0,0,0,.3); }
+.text { flex: 1; }
+.text b { display: block; }
+</style></head>
+<body><div id="list"></div><script>
+const list = document.getElementById("list");
+const html = [];
+for (let i = 0; i < 3000; i++) html.push(`<div class="row"><div class="dot"></div><div class="text"><b>Message ${i}</b>Line of text that wraps a little and keeps the layout busy ${i * 7}</div><span>${i % 24}:${i % 60}</span></div>`);
+list.innerHTML = html.join("");
+const frames = [];
+let last = 0, step = 0;
+function tick(now) {
+    if (last) frames.push(now - last);
+    last = now;
+    window.scrollBy(0, 40);
+    if (++step < 150) return requestAnimationFrame(tick);
+    frames.sort((a, b) => a - b);
+    const p95 = frames[Math.floor(frames.length * 0.95)];
+    const long = frames.filter(f => f > 34).length;
+    document.body.dataset.perf = JSON.stringify({ scroll_p95_ms: p95, scroll_long_frames: long });
+}
+requestAnimationFrame(() => requestAnimationFrame(tick));
+</script></body></html>
