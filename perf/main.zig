@@ -22,6 +22,10 @@ pub fn median(values: []f64) f64 {
     return values[values.len / 2];
 }
 
+pub fn best(value: f64, prev: ?f64) f64 {
+    return if (prev) |p| @min(value, p) else value;
+}
+
 pub fn regressed(value: f64, base: f64) bool {
     return value > base * TOLERANCE + SLACK;
 }
@@ -197,7 +201,9 @@ pub fn main(init: std.process.Init) !u8 {
         try out.appendSlice(gpa, "{\n");
         for (metrics.keys(), metrics.values(), 0..) |k, v, n| {
             var line: [256]u8 = undefined;
-            try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "  \"{s}\": {d:.2}{s}\n", .{ k, v, if (n + 1 < metrics.count()) "," else "" }));
+            const prev: ?f64 = if (base) |b| (if (b.value == .object) (if (b.value.object.get(k)) |x| number(x) else null) else null) else null;
+            const kept = if (update) v else best(v, prev);
+            try out.appendSlice(gpa, try std.fmt.bufPrint(&line, "  \"{s}\": {d:.2}{s}\n", .{ k, kept, if (n + 1 < metrics.count()) "," else "" }));
         }
         try out.appendSlice(gpa, "}\n");
         var err: [*c]c.GError = null;
@@ -210,6 +216,12 @@ test "a small slowdown passes and a large one fails" {
     try std.testing.expect(!regressed(110, 100));
     try std.testing.expect(regressed(120, 100));
     try std.testing.expect(!regressed(3, 1));
+}
+
+test "a passing run never loosens the baseline" {
+    try std.testing.expectEqual(@as(f64, 113), best(130, 113));
+    try std.testing.expectEqual(@as(f64, 100), best(100, 113));
+    try std.testing.expectEqual(@as(f64, 42), best(42, null));
 }
 
 test "median picks the middle sample" {
