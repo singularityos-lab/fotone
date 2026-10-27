@@ -15,3 +15,4 @@ fotone 0014-script-bytecode-disk-cache.patch
 fotone 0015-web-view-suspend.patch
 fotone 0016-release-suspended-page-memory.patch
 fotone 0017-http3-network-loads.patch
+fotone 0018-dns-cache.patch

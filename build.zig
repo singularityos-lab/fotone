@@ -217,6 +217,7 @@ pub fn build(b: *std.Build) void {
     net_mod.addIncludePath(b.path("net"));
     net_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ quic, "include" }) });
     net_mod.linkSystemLibrary("glib-2.0", .{});
+    net_mod.linkSystemLibrary("gio-2.0", .{});
     net_mod.linkSystemLibrary("gnutls", .{});
     for (net_archives) |a| net_mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ quic_lib, a }) });
     hooks.root_module.addImport("net", net_mod);

@@ -22,3 +22,4 @@
 #define G_GNUC_BEGIN_IGNORE_DEPRECATIONS
 #define G_GNUC_END_IGNORE_DEPRECATIONS
 #include <glib.h>
+#include <gio/gio.h>

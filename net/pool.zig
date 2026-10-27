@@ -1,5 +1,6 @@
 const std = @import("std");
 const h3 = @import("h3.zig");
+pub const dns = @import("dns.zig");
 const c = h3.c;
 
 const IDLE_NS = 30 * std.time.ns_per_s;
@@ -402,4 +403,12 @@ test "alt-svc routes expire, clear and survive lookups" {
     try std.testing.expectEqual(@as(?u16, null), route("example.com", 443));
     learn("example.org", 443, "h3=\":443\"; ma=0");
     try std.testing.expectEqual(@as(?u16, null), route("example.org", 443));
+}
+
+comptime {
+    _ = dns;
+}
+
+test {
+    _ = dns;
 }

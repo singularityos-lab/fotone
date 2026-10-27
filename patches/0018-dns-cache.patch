@@ -1,0 +1,23 @@
+--- a/Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp
++++ b/Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp
+@@ -37,6 +37,10 @@
+ #include <libsoup/soup.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++extern "C" {
++__attribute__((weak)) void fotone_dns_install();
++}
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+@@ -47,6 +51,9 @@
+     , m_networkSession(makeUnique<SoupNetworkSession>(m_sessionID))
+     , m_persistentCredentialStorageEnabled(parameters.persistentCredentialStorageEnabled)
+ {
++    if (fotone_dns_install)
++        fotone_dns_install();
++
+     CheckedPtr storageSession = networkStorageSession();
+     ASSERT(storageSession);
+ 
