@@ -96,6 +96,7 @@ fn display() ?*c.WPEDisplay {
     }
     devtools.prepare();
     privacy.identify();
+    settings.warmScripts();
     var err: [*c]c.GError = null;
     if (c.wpe_display_connect(d, &err) == 0) {
         std.log.warn("fotone display: {s}", .{if (err) |e| std.mem.span(e.*.message) else "unknown error"});

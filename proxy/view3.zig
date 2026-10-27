@@ -164,6 +164,9 @@ pub fn engineFn(comptime name: [:0]const u8) *const @TypeOf(@field(c, name)) {
 pub fn display() ?*c.WPEDisplay {
     if (shared) |d| return d;
     const d = c.fotone_display_new(null);
+    _ = c.g_setenv("JSC_thresholdForJITAfterWarmUp", "250", 0);
+    _ = c.g_setenv("JSC_thresholdForOptimizeAfterWarmUp", "500", 0);
+    _ = c.g_setenv("JSC_thresholdForFTLOptimizeAfterWarmUp", "50000", 0);
     var err: [*c]c.GError = null;
     if (c.wpe_display_connect(d, &err) == 0) {
         std.log.warn("fotone display: {s}", .{if (err) |e| std.mem.span(e.*.message) else "unknown error"});

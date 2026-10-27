@@ -86,6 +86,16 @@ fn changed(gs: ?*c.GtkSettings, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c
     sync(gs.?, @ptrCast(@alignCast(data)));
 }
 
+const jit = [_][2][*:0]const u8{
+    .{ "JSC_thresholdForJITAfterWarmUp", "250" },
+    .{ "JSC_thresholdForOptimizeAfterWarmUp", "500" },
+    .{ "JSC_thresholdForFTLOptimizeAfterWarmUp", "50000" },
+};
+
+pub fn warmScripts() void {
+    for (jit) |kv| _ = c.g_setenv(kv[0], kv[1], 0);
+}
+
 pub fn follow(display: *c.WPEDisplay) void {
     const gs = c.gtk_settings_get_default() orelse return;
     _ = c.wpe_settings_set_boolean(c.wpe_display_get_settings(display), c.WPE_SETTING_CREATE_VIEWS_WITH_A_TOPLEVEL, 0, c.WPE_SETTINGS_SOURCE_PLATFORM, null);
