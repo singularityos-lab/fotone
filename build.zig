@@ -1,7 +1,11 @@
 const std = @import("std");
 
+const net_archives = [_][]const u8{ "libngtcp2_crypto_gnutls.a", "libngtcp2.a", "libnghttp3.a" };
+
 const pin = @embedFile("upstream/wpewebkit");
 const dawn_pin = @embedFile("upstream/dawn");
+const ngtcp2_pin = @embedFile("upstream/ngtcp2");
+const nghttp3_pin = @embedFile("upstream/nghttp3");
 
 const engine_flags = [_][]const u8{
     "-DPORT=WPE",
@@ -153,6 +157,27 @@ pub fn build(b: *std.Build) void {
     dawn_stage.step.dependOn(&dawn_compile.step);
     b.step("dawn", "fetch and build Dawn for WebGPU").dependOn(&dawn_stage.step);
 
+    const quic = b.pathJoin(&.{ out, "quic" });
+    const quic_build = b.addSystemCommand(&.{ "sh", "-ec",
+        \\[ -f "$1/lib/libngtcp2_crypto_gnutls.a" ] && exit 0
+        \\mkdir -p "$1/src"
+        \\build() {
+        \\  t="$1/src/$2.tar.xz"
+        \\  [ -f "$t" ] || curl -fsSL -o "$t" "$3"
+        \\  echo "$4  $t" | sha256sum -c -
+        \\  tar --no-same-owner -C "$1/src" -xf "$t"
+        \\  cd "$1/src/$2"
+        \\  shift 4
+        \\  CFLAGS="-O2 -fPIC" ./configure --prefix="$P" --enable-lib-only --disable-shared --enable-static --with-pic "$@"
+        \\  make -j"$J" && make install
+        \\}
+        \\P="$1" J="$2"
+        \\build "$1" "nghttp3-$3" "$4" "$5"
+        \\build "$1" "ngtcp2-$6" "$7" "$8" --with-gnutls --without-openssl --without-libnghttp3
+    , "quic", quic, b.fmt("{d}", .{jobs}), comptime pinOf(nghttp3_pin, "version"), comptime pinOf(nghttp3_pin, "url"), comptime pinOf(nghttp3_pin, "sha256"), comptime pinOf(ngtcp2_pin, "version"), comptime pinOf(ngtcp2_pin, "url"), comptime pinOf(ngtcp2_pin, "sha256") });
+    const quic_lib = b.pathJoin(&.{ quic, "lib" });
+    const net_libs = b.fmt("{s}/{s};{s}/{s};{s}/{s};-lgnutls", .{ quic_lib, net_archives[0], quic_lib, net_archives[1], quic_lib, net_archives[2] });
+
     const lower = b.addRunArtifact(b.addExecutable(.{
         .name = "fotone-lower",
         .root_module = b.createModule(.{ .root_source_file = b.path("webgpu/lower.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true }),
@@ -188,7 +213,15 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true }),
     });
     hooks.root_module.addImport("webgpu", webgpu_mod);
+    const net_mod = b.createModule(.{ .root_source_file = b.path("net/pool.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true });
+    net_mod.addIncludePath(b.path("net"));
+    net_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ quic, "include" }) });
+    net_mod.linkSystemLibrary("glib-2.0", .{});
+    net_mod.linkSystemLibrary("gnutls", .{});
+    for (net_archives) |a| net_mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ quic_lib, a }) });
+    hooks.root_module.addImport("net", net_mod);
     hooks.step.dependOn(&dawn_compile.step);
+    hooks.step.dependOn(&quic_build.step);
 
     const ocdm_mod = b.createModule(.{ .root_source_file = b.path("ocdm/ocdm.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
     ocdm_mod.addIncludePath(b.path("ocdm"));
@@ -207,6 +240,7 @@ pub fn build(b: *std.Build) void {
     configure.addArg(b.fmt("-DTHUNDER_INCLUDE_DIR={s}", .{b.pathFromRoot("ocdm")}));
     configure.addPrefixedFileArg("-DTHUNDER_LIBRARY=", ocdm.getEmittedBin());
     configure.addPrefixedFileArg("-DFOTONE_HOOKS=", hooks.getEmittedBin());
+    configure.addArg(b.fmt("-DFOTONE_NET_LIBS={s}", .{net_libs}));
     configure.step.dependOn(&fetch.step);
 
     const compile = b.addSystemCommand(&.{ "ninja", "-C", out, b.fmt("-j{d}", .{jobs}) });
@@ -261,11 +295,12 @@ pub fn build(b: *std.Build) void {
 
     const h3_mod = b.createModule(.{ .root_source_file = b.path("net/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     h3_mod.addIncludePath(b.path("net"));
-    h3_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/libngtcp2_crypto_gnutls.a" });
-    h3_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/libngtcp2.a" });
-    h3_mod.addObjectFile(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu/libnghttp3.a" });
+    h3_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ quic, "include" }) });
+    for (net_archives) |a| h3_mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ quic_lib, a }) });
     h3_mod.linkSystemLibrary("gnutls", .{});
+    h3_mod.linkSystemLibrary("glib-2.0", .{});
     const h3 = b.addExecutable(.{ .name = "fotone-h3", .root_module = h3_mod });
+    h3.step.dependOn(&quic_build.step);
     b.installArtifact(h3);
 
     const engine_mod = b.createModule(.{ .root_source_file = b.path("engine/engine.zig"), .target = target, .optimize = optimize, .pic = true, .link_libc = true });
@@ -361,10 +396,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(t).step);
     test_step.dependOn(&b.addRunArtifact(wt).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = hooks.root_module })).step);
+    const hooks_test = b.addTest(.{ .root_module = hooks.root_module });
+    hooks_test.step.dependOn(&quic_build.step);
+    test_step.dependOn(&b.addRunArtifact(hooks_test).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = webgpu_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bump_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = perf_mod })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_mod })).step);
+    for ([_]*std.Build.Module{ h3_mod, net_mod }) |m| {
+        const unit = b.addTest(.{ .root_module = m });
+        unit.step.dependOn(&quic_build.step);
+        test_step.dependOn(&b.addRunArtifact(unit).step);
+    }
 }

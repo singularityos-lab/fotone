@@ -1,0 +1,511 @@
+--- a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h
++++ b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h
+@@ -149,6 +149,16 @@
+ 
+     WebCore::AdditionalNetworkLoadMetricsForWebInspector& additionalNetworkLoadMetricsForWebInspector();
+ 
++    void sendSoupRequest();
++    bool startHTTP3();
++    void stopHTTP3(GError*);
++    void fallBackFromHTTP3();
++    static void http3ResponseCallback(void*, const char*, size_t);
++    static void http3DataCallback(void*, const uint8_t*, size_t);
++    static void http3DoneCallback(void*, int);
++    void didReceiveHTTP3Response(std::span<const char>);
++    void didCompleteHTTP3(bool);
++
+     Markable<WebCore::FrameIdentifier> m_frameID;
+     Markable<WebCore::PageIdentifier> m_pageID;
+     State m_state { State::Suspended };
+@@ -175,6 +185,11 @@
+     bool m_isBlockingCookies { false };
+     RefPtr<WebCore::SecurityOrigin> m_sourceOrigin;
+     RunLoop::Timer m_timeoutSource;
++    void* m_http3 { nullptr };
++    GRefPtr<GInputStream> m_http3Stream;
++    bool m_http3Responded { false };
++    bool m_http3PendingResponse { false };
++    bool m_http3Failed { false };
+ };
+ 
+ } // namespace WebKit
+--- a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
++++ b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
+@@ -51,6 +51,171 @@
+ #include <wtf/glib/RunLoopSourcePriority.h>
+ #include <wtf/text/MakeString.h>
+ 
++extern "C" {
++struct FotoneHTTP3Sink {
++    void (*response)(void*, const char*, size_t);
++    void (*data)(void*, const uint8_t*, size_t);
++    void (*done)(void*, int);
++};
++__attribute__((weak)) unsigned fotone_h3_route(const char*, unsigned);
++__attribute__((weak)) void fotone_h3_learn(const char*, unsigned, const char*);
++__attribute__((weak)) void* fotone_h3_start(const char*, unsigned, const char*, const char*, const char*, size_t, const FotoneHTTP3Sink*, void*, GMainContext*);
++__attribute__((weak)) void fotone_h3_cancel(void*);
++__attribute__((weak)) void fotone_h3_release(void*);
++}
++
++typedef struct {
++    GInputStream parent;
++    GMutex mutex;
++    GCond cond;
++    GByteArray* buffer;
++    gboolean finished;
++    GError* error;
++    GTask* pending;
++    void* pendingBuffer;
++    gsize pendingCount;
++} FotonePushStream;
++
++typedef struct {
++    GInputStreamClass parent;
++} FotonePushStreamClass;
++
++G_DEFINE_TYPE(FotonePushStream, fotone_push_stream, G_TYPE_INPUT_STREAM)
++
++static gssize fotonePushStreamTake(FotonePushStream* stream, void* buffer, gsize count)
++{
++    gsize length = std::min<gsize>(count, stream->buffer->len);
++    memcpy(buffer, stream->buffer->data, length);
++    g_byte_array_remove_range(stream->buffer, 0, length);
++    return length;
++}
++
++static gssize fotonePushStreamRead(GInputStream* base, void* buffer, gsize count, GCancellable*, GError** error)
++{
++    auto* stream = reinterpret_cast<FotonePushStream*>(base);
++    g_mutex_lock(&stream->mutex);
++    while (!stream->buffer->len && !stream->finished)
++        g_cond_wait(&stream->cond, &stream->mutex);
++    gssize result = 0;
++    if (stream->buffer->len)
++        result = fotonePushStreamTake(stream, buffer, count);
++    else if (stream->error) {
++        g_set_error_literal(error, stream->error->domain, stream->error->code, stream->error->message);
++        result = -1;
++    }
++    g_mutex_unlock(&stream->mutex);
++    return result;
++}
++
++static void fotonePushStreamReadAsync(GInputStream* base, void* buffer, gsize count, int priority, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
++{
++    auto* stream = reinterpret_cast<FotonePushStream*>(base);
++    GTask* task = g_task_new(base, cancellable, callback, userData);
++    g_task_set_priority(task, priority);
++    g_mutex_lock(&stream->mutex);
++    if (!stream->buffer->len && !stream->finished) {
++        stream->pending = task;
++        stream->pendingBuffer = buffer;
++        stream->pendingCount = count;
++        g_mutex_unlock(&stream->mutex);
++        return;
++    }
++    gssize result = 0;
++    GError* error = nullptr;
++    if (stream->buffer->len)
++        result = fotonePushStreamTake(stream, buffer, count);
++    else if (stream->error)
++        error = g_error_copy(stream->error);
++    g_mutex_unlock(&stream->mutex);
++    if (error)
++        g_task_return_error(task, error);
++    else
++        g_task_return_int(task, result);
++    g_object_unref(task);
++}
++
++static gssize fotonePushStreamReadFinish(GInputStream*, GAsyncResult* result, GError** error)
++{
++    return g_task_propagate_int(G_TASK(result), error);
++}
++
++static void fotonePushStreamWake(FotonePushStream* stream)
++{
++    g_mutex_lock(&stream->mutex);
++    GTask* task = nullptr;
++    gssize result = 0;
++    GError* error = nullptr;
++    if (stream->pending && (stream->buffer->len || stream->finished)) {
++        task = std::exchange(stream->pending, nullptr);
++        if (stream->buffer->len)
++            result = fotonePushStreamTake(stream, stream->pendingBuffer, stream->pendingCount);
++        else if (stream->error)
++            error = g_error_copy(stream->error);
++    }
++    g_cond_broadcast(&stream->cond);
++    g_mutex_unlock(&stream->mutex);
++    if (!task)
++        return;
++    if (error)
++        g_task_return_error(task, error);
++    else
++        g_task_return_int(task, result);
++    g_object_unref(task);
++}
++
++static void fotonePushStreamPush(GInputStream* base, const uint8_t* data, size_t length)
++{
++    auto* stream = reinterpret_cast<FotonePushStream*>(base);
++    g_mutex_lock(&stream->mutex);
++    if (!stream->finished)
++        g_byte_array_append(stream->buffer, data, length);
++    g_mutex_unlock(&stream->mutex);
++    fotonePushStreamWake(stream);
++}
++
++static void fotonePushStreamFinish(GInputStream* base, GError* error)
++{
++    auto* stream = reinterpret_cast<FotonePushStream*>(base);
++    g_mutex_lock(&stream->mutex);
++    if (stream->finished) {
++        g_mutex_unlock(&stream->mutex);
++        if (error)
++            g_error_free(error);
++        return;
++    }
++    stream->finished = TRUE;
++    stream->error = error;
++    g_mutex_unlock(&stream->mutex);
++    fotonePushStreamWake(stream);
++}
++
++static void fotonePushStreamFinalize(GObject* object)
++{
++    auto* stream = reinterpret_cast<FotonePushStream*>(object);
++    g_byte_array_unref(stream->buffer);
++    if (stream->error)
++        g_error_free(stream->error);
++    g_mutex_clear(&stream->mutex);
++    g_cond_clear(&stream->cond);
++    G_OBJECT_CLASS(fotone_push_stream_parent_class)->finalize(object);
++}
++
++static void fotone_push_stream_init(FotonePushStream* stream)
++{
++    g_mutex_init(&stream->mutex);
++    g_cond_init(&stream->cond);
++    stream->buffer = g_byte_array_new();
++}
++
++static void fotone_push_stream_class_init(FotonePushStreamClass* klass)
++{
++    G_OBJECT_CLASS(klass)->finalize = fotonePushStreamFinalize;
++    auto* streamClass = G_INPUT_STREAM_CLASS(klass);
++    streamClass->read_fn = fotonePushStreamRead;
++    streamClass->read_async = fotonePushStreamReadAsync;
++    streamClass->read_finish = fotonePushStreamReadFinish;
++}
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+@@ -217,6 +382,7 @@
+     m_state = State::Completed;
+ 
+     stopTimeout();
++    stopHTTP3(g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Operation was cancelled"));
+     m_pendingResult = nullptr;
+     m_file = nullptr;
+     m_inputStream = nullptr;
+@@ -254,19 +420,14 @@
+         if (m_shouldPreconnectOnly == PreconnectOnly::Yes) {
+             soup_session_preconnect_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
+                 reinterpret_cast<GAsyncReadyCallback>(preconnectCallback), protectedThis.leakRef());
+-        } else {
+-            // We need to protect cancellable here, because soup_session_send_async uses it after emitting SoupSession::request-queued, and we
+-            // might cancel the operation in a feature callback emitted on request-queued, for example hsts-enforced.
+-            GRefPtr<GCancellable> protectCancellable(m_cancellable);
+-            soup_session_send_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
+-                reinterpret_cast<GAsyncReadyCallback>(sendRequestCallback), new SendRequestData({ m_soupMessage, WTF::move(protectedThis) }));
+-            if (!g_cancellable_is_cancelled(protectCancellable.get()) && !m_networkLoadMetrics.fetchStart) {
+-                auto* metrics = soup_message_get_metrics(m_soupMessage.get());
+-                m_networkLoadMetrics.fetchStart = MonotonicTime::fromRawSeconds(Seconds::fromMicroseconds(soup_message_metrics_get_fetch_start(metrics)).seconds());
+-                if (!m_networkLoadMetrics.redirectStart)
+-                    m_networkLoadMetrics.redirectStart = m_networkLoadMetrics.fetchStart;
+-            }
+-        }
++        } else if (!startHTTP3())
++            sendSoupRequest();
++        return;
++    }
++
++    if (m_http3PendingResponse) {
++        m_http3PendingResponse = false;
++        dispatchDidReceiveResponse();
+         return;
+     }
+ 
+@@ -297,12 +458,242 @@
+     }
+ }
+ 
++void NetworkDataTaskSoup::sendSoupRequest()
++{
++    RefPtr<NetworkDataTaskSoup> protectedThis(this);
++    // We need to protect cancellable here, because soup_session_send_async uses it after emitting SoupSession::request-queued, and we
++    // might cancel the operation in a feature callback emitted on request-queued, for example hsts-enforced.
++    GRefPtr<GCancellable> protectCancellable(m_cancellable);
++    soup_session_send_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
++        reinterpret_cast<GAsyncReadyCallback>(sendRequestCallback), new SendRequestData({ m_soupMessage, WTF::move(protectedThis) }));
++    if (!g_cancellable_is_cancelled(protectCancellable.get()) && !m_networkLoadMetrics.fetchStart) {
++        auto* metrics = soup_message_get_metrics(m_soupMessage.get());
++        m_networkLoadMetrics.fetchStart = MonotonicTime::fromRawSeconds(Seconds::fromMicroseconds(soup_message_metrics_get_fetch_start(metrics)).seconds());
++        if (!m_networkLoadMetrics.redirectStart)
++            m_networkLoadMetrics.redirectStart = m_networkLoadMetrics.fetchStart;
++    }
++}
++
++static SoupCookieJar* cookieJarFor(SoupSession* session, SoupMessage* message)
++{
++    if (soup_message_is_feature_disabled(message, SOUP_TYPE_COOKIE_JAR))
++        return nullptr;
++    return SOUP_COOKIE_JAR(soup_session_get_feature(session, SOUP_TYPE_COOKIE_JAR));
++}
++
++bool NetworkDataTaskSoup::startHTTP3()
++{
++    if (!fotone_h3_start || !fotone_h3_route || m_http3Failed || isTopLevelNavigation() || isDownload() || !m_soupMessage)
++        return false;
++    auto* message = m_soupMessage.get();
++    auto* uri = soup_message_get_uri(message);
++    const char* method = soup_message_get_method(message);
++    if (g_strcmp0(g_uri_get_scheme(uri), "https") || (g_strcmp0(method, SOUP_METHOD_GET) && g_strcmp0(method, SOUP_METHOD_HEAD)) || m_currentRequest.httpBody())
++        return false;
++    const char* host = g_uri_get_host(uri);
++    int port = g_uri_get_port(uri) > 0 ? g_uri_get_port(uri) : 443;
++    if (!host || !fotone_h3_route(host, port))
++        return false;
++
++    Vector<char> headers;
++    auto append = [&](const char* name, const char* value) {
++        for (const char* c = name; *c; ++c)
++            headers.append(toASCIILower(*c));
++        headers.append('\0');
++        headers.append(std::span(value, strlen(value)));
++        headers.append('\0');
++    };
++    SoupMessageHeadersIter iter;
++    const char* name;
++    const char* value;
++    soup_message_headers_iter_init(&iter, soup_message_get_request_headers(message));
++    while (soup_message_headers_iter_next(&iter, &name, &value)) {
++        if (!g_ascii_strcasecmp(name, "host") || !g_ascii_strcasecmp(name, "connection") || !g_ascii_strcasecmp(name, "keep-alive") || !g_ascii_strcasecmp(name, "transfer-encoding")
++            || !g_ascii_strcasecmp(name, "upgrade") || !g_ascii_strcasecmp(name, "proxy-connection") || !g_ascii_strcasecmp(name, "te") || !g_ascii_strcasecmp(name, "accept-encoding"))
++            continue;
++        append(name, value);
++    }
++    append("accept-encoding", "gzip");
++    auto* session = static_cast<NetworkSessionSoup&>(*m_session).soupSession();
++    if (auto* jar = cookieJarFor(session, message)) {
++        GSList* cookies = soup_cookie_jar_get_cookie_list_with_same_site_info(jar, uri, soup_message_get_first_party(message), soup_message_get_site_for_cookies(message), TRUE,
++            TRUE, soup_message_get_is_top_level_navigation(message));
++        if (cookies) {
++            GUniquePtr<char> header(soup_cookies_to_cookie_header(cookies));
++            append("cookie", header.get());
++            g_slist_free_full(cookies, reinterpret_cast<GDestroyNotify>(soup_cookie_free));
++        }
++    }
++    GUniquePtr<char> path(g_uri_join(G_URI_FLAGS_ENCODED, nullptr, nullptr, nullptr, -1, g_uri_get_path(uri), g_uri_get_query(uri), nullptr));
++    m_http3Stream = adoptGRef(G_INPUT_STREAM(g_object_new(fotone_push_stream_get_type(), nullptr)));
++    static const FotoneHTTP3Sink sink = { http3ResponseCallback, http3DataCallback, http3DoneCallback };
++    ref();
++    m_http3 = fotone_h3_start(host, port, method, path.get()[0] ? path.get() : "/", headers.span().data(), headers.size(), &sink, this, nullptr);
++    if (!m_http3) {
++        m_http3Stream = nullptr;
++        deref();
++        return false;
++    }
++    m_networkLoadMetrics.fetchStart = MonotonicTime::now();
++    if (!m_networkLoadMetrics.redirectStart)
++        m_networkLoadMetrics.redirectStart = m_networkLoadMetrics.fetchStart;
++    return true;
++}
++
++void NetworkDataTaskSoup::stopHTTP3(GError* error)
++{
++    if (m_http3Stream)
++        fotonePushStreamFinish(m_http3Stream.get(), error);
++    else if (error)
++        g_error_free(error);
++    if (!m_http3)
++        return;
++    void* handle = std::exchange(m_http3, nullptr);
++    if (fotone_h3_cancel)
++        fotone_h3_cancel(handle);
++    if (fotone_h3_release)
++        fotone_h3_release(handle);
++    deref();
++}
++
++void NetworkDataTaskSoup::fallBackFromHTTP3()
++{
++    RefPtr<NetworkDataTaskSoup> protectedThis(this);
++    m_http3Failed = true;
++    stopHTTP3(nullptr);
++    m_http3Stream = nullptr;
++    m_networkLoadMetrics = { };
++    if (m_state != State::Canceling && m_state != State::Completed)
++        sendSoupRequest();
++}
++
++void NetworkDataTaskSoup::http3ResponseCallback(void* data, const char* headers, size_t length)
++{
++    static_cast<NetworkDataTaskSoup*>(data)->didReceiveHTTP3Response(std::span(headers, length));
++}
++
++void NetworkDataTaskSoup::http3DataCallback(void* data, const uint8_t* bytes, size_t length)
++{
++    auto* task = static_cast<NetworkDataTaskSoup*>(data);
++    if (task->m_http3Stream)
++        fotonePushStreamPush(task->m_http3Stream.get(), bytes, length);
++}
++
++void NetworkDataTaskSoup::http3DoneCallback(void* data, int ok)
++{
++    static_cast<NetworkDataTaskSoup*>(data)->didCompleteHTTP3(ok);
++}
++
++void NetworkDataTaskSoup::didReceiveHTTP3Response(std::span<const char> block)
++{
++    if (m_state == State::Canceling || m_state == State::Completed || !m_soupMessage)
++        return;
++    Vector<std::pair<CString, CString>> fields;
++    int status = 0;
++    size_t offset = 0;
++    while (offset < block.size()) {
++        auto rest = block.subspan(offset);
++        size_t nameLength = strnlen(rest.data(), rest.size());
++        if (nameLength + 1 >= rest.size())
++            break;
++        auto valueSpan = rest.subspan(nameLength + 1);
++        size_t valueLength = strnlen(valueSpan.data(), valueSpan.size());
++        CString name(std::span<const char>(rest.data(), nameLength));
++        CString value(std::span<const char>(valueSpan.data(), valueLength));
++        offset += nameLength + valueLength + 2;
++        if (!strcmp(name.data(), ":status"))
++            status = atoi(value.data());
++        else if (name.length() && name.data()[0] != ':')
++            fields.append({ WTF::move(name), WTF::move(value) });
++    }
++    if (status < 200 || (status >= 300 && status < 400) || status == 401 || status == 407 || status == 421) {
++        fallBackFromHTTP3();
++        return;
++    }
++
++    auto* message = m_soupMessage.get();
++    auto* uri = soup_message_get_uri(message);
++    auto* jar = cookieJarFor(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), message);
++    String contentType;
++    String contentEncoding;
++    long long contentLength = -1;
++    for (auto& field : fields) {
++        if (!strcmp(field.first.data(), "content-type"))
++            contentType = String::fromUTF8(field.second.data());
++        else if (!strcmp(field.first.data(), "content-encoding"))
++            contentEncoding = String::fromUTF8(field.second.data());
++        else if (!strcmp(field.first.data(), "content-length"))
++            contentLength = g_ascii_strtoll(field.second.data(), nullptr, 10);
++        else if (!strcmp(field.first.data(), "set-cookie") && jar) {
++            if (auto* cookie = soup_cookie_parse(field.second.data(), uri))
++                soup_cookie_jar_add_cookie_full(jar, cookie, uri, soup_message_get_first_party(message));
++        } else if (!strcmp(field.first.data(), "alt-svc") && fotone_h3_learn)
++            fotone_h3_learn(g_uri_get_host(uri), g_uri_get_port(uri) > 0 ? g_uri_get_port(uri) : 443, field.second.data());
++    }
++
++    GRefPtr<GInputStream> body = m_http3Stream;
++    if (equalLettersIgnoringASCIICase(contentEncoding, "gzip"_s)) {
++        GRefPtr<GConverter> decompressor = adoptGRef(G_CONVERTER(g_zlib_decompressor_new(G_ZLIB_COMPRESSOR_FORMAT_GZIP)));
++        body = adoptGRef(g_converter_input_stream_new(m_http3Stream.get(), decompressor.get()));
++        contentLength = -1;
++    } else if (!contentEncoding.isEmpty() && !equalLettersIgnoringASCIICase(contentEncoding, "identity"_s)) {
++        fallBackFromHTTP3();
++        return;
++    }
++
++    URL url = m_currentRequest.url();
++    String mimeType = extractMIMETypeFromMediaType(contentType);
++    if (mimeType.isEmpty())
++        mimeType = MIMETypeRegistry::mimeTypeForPath(url.path());
++    ResourceResponse response(URL(url), WTF::move(mimeType), contentLength, extractCharsetFromMediaType(contentType).toString());
++    response.setHTTPStatusCode(status);
++    response.setHTTPVersion("HTTP/3"_s);
++    for (auto& field : fields)
++        response.addHTTPHeaderField(String::fromUTF8(field.first.data()), String::fromUTF8(field.second.data()));
++
++    m_networkLoadMetrics.responseStart = MonotonicTime::now();
++    m_networkLoadMetrics.protocol = "h3"_s;
++    m_response = WTF::move(response);
++    m_inputStream = WTF::move(body);
++    m_http3Responded = true;
++    if (m_state == State::Suspended) {
++        m_http3PendingResponse = true;
++        return;
++    }
++    dispatchDidReceiveResponse();
++}
++
++void NetworkDataTaskSoup::didCompleteHTTP3(bool ok)
++{
++    RefPtr<NetworkDataTaskSoup> protectedThis(this);
++    void* handle = std::exchange(m_http3, nullptr);
++    if (!handle)
++        return;
++    if (fotone_h3_release)
++        fotone_h3_release(handle);
++    deref();
++    if (!m_http3Responded) {
++        if (m_state != State::Canceling && m_state != State::Completed) {
++            m_http3Failed = true;
++            m_http3Stream = nullptr;
++            m_networkLoadMetrics = { };
++            sendSoupRequest();
++        }
++        return;
++    }
++    m_networkLoadMetrics.responseEnd = MonotonicTime::now();
++    m_networkLoadMetrics.markComplete();
++    if (m_http3Stream)
++        fotonePushStreamFinish(m_http3Stream.get(), ok ? nullptr : g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED, "HTTP/3 stream closed"));
++}
++
+ void NetworkDataTaskSoup::cancel()
+ {
+     if (m_state == State::Canceling || m_state == State::Completed)
+         return;
+ 
+     m_state = State::Canceling;
++    stopHTTP3(g_error_new_literal(G_IO_ERROR, G_IO_ERROR_CANCELLED, "Operation was cancelled"));
+ 
+     g_cancellable_cancel(m_cancellable.get());
+ 
+@@ -1071,6 +1462,13 @@
+ 
+ void NetworkDataTaskSoup::didGetHeaders()
+ {
++    if (fotone_h3_learn) {
++        auto* uri = soup_message_get_uri(m_soupMessage.get());
++        const char* altSvc = soup_message_headers_get_one(soup_message_get_response_headers(m_soupMessage.get()), "Alt-Svc");
++        if (altSvc && !g_strcmp0(g_uri_get_scheme(uri), "https") && g_uri_get_host(uri))
++            fotone_h3_learn(g_uri_get_host(uri), g_uri_get_port(uri) > 0 ? g_uri_get_port(uri) : 443, altSvc);
++    }
++
+     // We are a bit more conservative with the persistent credential storage than the session store,
+     // since we are waiting until we know that this authentication succeeded before actually storing.
+     // This is because we want to avoid hitting the disk twice (once to add and once to remove) for
+--- a/Source/WebKit/PlatformWPE.cmake
++++ b/Source/WebKit/PlatformWPE.cmake
+@@ -829,6 +829,10 @@
+     list(APPEND WebKit_PRIVATE_LIBRARIES -Wl,--whole-archive ${FOTONE_HOOKS} -Wl,--no-whole-archive)
+ endif ()
+ 
++if (FOTONE_NET_LIBS)
++    list(APPEND WebKit_PRIVATE_LIBRARIES ${FOTONE_NET_LIBS})
++endif ()
++
+ if (ENABLE_WEB_AUTHN)
+     list(APPEND WebKit_PRIVATE_INCLUDE_DIRECTORIES
+         "${WEBKIT_DIR}/UIProcess/WebAuthentication/fido"
