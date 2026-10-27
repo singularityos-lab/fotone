@@ -123,6 +123,12 @@ fn dmabufTexture(w: *WebView, buffer: *c.WPEBuffer) ?*c.GdkTexture {
         c.gdk_dmabuf_texture_builder_set_stride(b, i, c.wpe_buffer_dma_buf_get_stride(d, i));
         c.gdk_dmabuf_texture_builder_set_offset(b, i, c.wpe_buffer_dma_buf_get_offset(d, i));
     }
+    const region = damageOf(w, buffer);
+    defer if (region) |r| c.cairo_region_destroy(r);
+    if (region) |r| {
+        c.gdk_dmabuf_texture_builder_set_update_texture(b, w.texture);
+        c.gdk_dmabuf_texture_builder_set_update_region(b, r);
+    }
     var err: [*c]c.GError = null;
     const t = c.gdk_dmabuf_texture_builder_build(b, releaseBuffer, c.g_object_ref(buffer), &err);
     if (t == null) {
@@ -133,7 +139,22 @@ fn dmabufTexture(w: *WebView, buffer: *c.WPEBuffer) ?*c.GdkTexture {
     return t;
 }
 
-fn shmTexture(buffer: *c.WPEBuffer) ?*c.GdkTexture {
+fn damageOf(w: *WebView, buffer: *c.WPEBuffer) ?*c.cairo_region_t {
+    const old = w.texture orelse return null;
+    if (c.gdk_texture_get_width(old) != c.wpe_buffer_get_width(buffer) or c.gdk_texture_get_height(old) != c.wpe_buffer_get_height(buffer)) return null;
+    const v = w.view orelse return null;
+    var n: c.guint = 0;
+    const rects = c.fotone_view_get_damage(v, &n);
+    if (n == 0) return null;
+    const region = c.cairo_region_create();
+    for (rects[0..n]) |r| {
+        const cr: c.cairo_rectangle_int_t = .{ .x = r.x, .y = r.y, .width = r.width, .height = r.height };
+        _ = c.cairo_region_union_rectangle(region, &cr);
+    }
+    return region;
+}
+
+fn shmTexture(w: *WebView, buffer: *c.WPEBuffer) ?*c.GdkTexture {
     const s: *c.WPEBufferSHM = @ptrCast(buffer);
     if (c.wpe_buffer_shm_get_format(s) != c.WPE_PIXEL_FORMAT_ARGB8888) return null;
     const src = c.wpe_buffer_shm_get_data(s) orelse return null;
@@ -141,7 +162,20 @@ fn shmTexture(buffer: *c.WPEBuffer) ?*c.GdkTexture {
     const data = c.g_bytes_get_data(src, &size);
     const copy = c.g_bytes_new(data, size);
     defer c.g_bytes_unref(copy);
-    return c.gdk_memory_texture_new(c.wpe_buffer_get_width(buffer), c.wpe_buffer_get_height(buffer), c.GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, copy, c.wpe_buffer_shm_get_stride(s));
+    const b = c.gdk_memory_texture_builder_new();
+    defer c.g_object_unref(b);
+    c.gdk_memory_texture_builder_set_width(b, c.wpe_buffer_get_width(buffer));
+    c.gdk_memory_texture_builder_set_height(b, c.wpe_buffer_get_height(buffer));
+    c.gdk_memory_texture_builder_set_format(b, c.GDK_MEMORY_B8G8R8A8_PREMULTIPLIED);
+    c.gdk_memory_texture_builder_set_bytes(b, copy);
+    c.gdk_memory_texture_builder_set_stride(b, c.wpe_buffer_shm_get_stride(s));
+    const region = damageOf(w, buffer);
+    defer if (region) |r| c.cairo_region_destroy(r);
+    if (region) |r| {
+        c.gdk_memory_texture_builder_set_update_texture(b, w.texture);
+        c.gdk_memory_texture_builder_set_update_region(b, r);
+    }
+    return c.gdk_memory_texture_builder_build(b);
 }
 
 fn isA(o: anytype, t: c.GType) bool {
@@ -155,7 +189,7 @@ fn frame(view: ?*c.WPEView, buffer: ?*c.WPEBuffer, data: c.gpointer) callconv(.c
         c.fotone_view_frame_presented(view);
         return;
     }
-    const t = if (isA(b, c.wpe_buffer_dma_buf_get_type())) dmabufTexture(w, b) else if (isA(b, c.wpe_buffer_shm_get_type())) shmTexture(b) else null;
+    const t = if (isA(b, c.wpe_buffer_dma_buf_get_type())) dmabufTexture(w, b) else if (isA(b, c.wpe_buffer_shm_get_type())) shmTexture(w, b) else null;
     if (t == null) {
         c.fotone_view_frame_presented(view);
         return;

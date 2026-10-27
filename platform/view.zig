@@ -17,7 +17,11 @@ pub const View = extern struct {
     a11y_func: AccessibleFunc,
     a11y_data: c.gpointer,
     a11y_destroy: c.GDestroyNotify,
+    damage: [max_damage]c.WPERectangle,
+    n_damage: c.guint,
 };
+
+const max_damage = 16;
 
 const Accessible = extern struct {
     parent: c.GObject,
@@ -141,8 +145,10 @@ fn present(v: *View) void {
     c.wpe_view_buffer_rendered(&v.parent, b);
 }
 
-fn renderBuffer(view: [*c]c.WPEView, buffer: [*c]c.WPEBuffer, _: [*c]const c.WPERectangle, _: c.guint, _: [*c][*c]c.GError) callconv(.c) c.gboolean {
+fn renderBuffer(view: [*c]c.WPEView, buffer: [*c]c.WPEBuffer, rects: [*c]const c.WPERectangle, n: c.guint, _: [*c][*c]c.GError) callconv(.c) c.gboolean {
     const v = of(view);
+    v.n_damage = if (n > max_damage or rects == null) 0 else n;
+    if (v.n_damage > 0) @memcpy(v.damage[0..v.n_damage], rects[0..v.n_damage]);
     g.unrefPtr(&v.pending);
     v.pending = @ptrCast(@alignCast(c.g_object_ref(buffer)));
     if (v.func) |f| f(view, buffer, v.data) else present(v);
@@ -169,6 +175,12 @@ pub export fn fotone_view_set_frame_func(view: [*c]c.WPEView, func: FrameFunc, d
     v.func = func;
     v.data = data;
     v.destroy = destroy;
+}
+
+pub export fn fotone_view_get_damage(view: [*c]c.WPEView, n: [*c]c.guint) [*c]const c.WPERectangle {
+    const v = of(view);
+    n.* = v.n_damage;
+    return &v.damage;
 }
 
 pub export fn fotone_view_frame_presented(view: [*c]c.WPEView) void {

@@ -24,6 +24,8 @@ void         fotone_view_set_frame_func     (WPEView        *view,
                                              gpointer        user_data,
                                              GDestroyNotify  destroy);
 void         fotone_view_frame_presented    (WPEView        *view);
+const WPERectangle *fotone_view_get_damage  (WPEView        *view,
+                                             guint          *n_rects);
 void         fotone_view_set_accessible_func (WPEView             *view,
                                               FotoneAccessibleFunc func,
                                               gpointer             user_data,
