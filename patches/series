@@ -10,3 +10,4 @@ fotone 0009-sinty-media-engine.patch
 upstream 0010-xdg-mime-ambiguous-extension.patch
 fotone 0011-web-authn-non-cocoa-build.patch
 fotone 0012-webdriver-and-gpu-build-fixes.patch
+fotone 0013-scroll-aware-tile-coverage.patch

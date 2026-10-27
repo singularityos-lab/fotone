@@ -1,0 +1,51 @@
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreProxy.cpp
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreProxy.cpp
+@@ -239,13 +239,18 @@
+ 
+ void CoordinatedBackingStoreProxy::createOrDestroyTiles(const IntRect& unscaledVisibleRect, const IntRect& unscaledContentsRect, const IntSize& unscaledViewportSize, float contentsScale, int maxTextureSize, Damage& damage, Vector<uint32_t>& tilesToCreate, Vector<uint32_t>& tilesToRemove)
+ {
+-    float coverAreaMultiplier = MemoryPressureHandler::singleton().isUnderMemoryPressure() ? 1.0f : 2.0f;
+     bool contentsScaleChanged = m_contentsScale != contentsScale;
+     m_contentsScale = contentsScale;
+ 
+     IntRect contentsRect = mapFromContents(unscaledContentsRect);
+     IntRect visibleRect = mapFromContents(unscaledVisibleRect);
+     bool contentsRectChanged = contentsScaleChanged || m_contentsRect != contentsRect;
++    m_scrollDelta = contentsScaleChanged || m_visibleRect.isEmpty() || visibleRect.size() != m_visibleRect.size() ? IntSize() : visibleRect.location() - m_visibleRect.location();
++    float coverAreaMultiplier = 1.0f;
++    if (!MemoryPressureHandler::singleton().isUnderMemoryPressure()) {
++        bool fastScroll = std::abs(m_scrollDelta.height()) * 4 > visibleRect.height() || std::abs(m_scrollDelta.width()) * 4 > visibleRect.width();
++        coverAreaMultiplier = fastScroll ? 3.0f : 2.0f;
++    }
+     bool geometryChanged = contentsRectChanged || m_visibleRect != visibleRect || m_coverAreaMultiplier != coverAreaMultiplier;
+     if (!geometryChanged && !m_pendingTileCreation)
+         return;
+@@ -505,9 +510,16 @@
+     // If we cover more that the actual viewport we can be smart about which tiles we choose to render.
+     if (m_coverAreaMultiplier > 1) {
+         // The initial cover area covers equally in each direction, according to the coverAreaMultiplier.
+-        coverRect.inflateX(m_visibleRect.width() * (m_coverAreaMultiplier - 1) / 2);
+-        coverRect.inflateY(m_visibleRect.height() * (m_coverAreaMultiplier - 1) / 2);
++        int extraX = m_visibleRect.width() * (m_coverAreaMultiplier - 1) / 2;
++        int extraY = m_visibleRect.height() * (m_coverAreaMultiplier - 1) / 2;
++        coverRect.inflateX(extraX);
++        coverRect.inflateY(extraY);
+         keepRect = coverRect;
++        // While scrolling, move the cover area ahead of the motion so the tiles about to
++        // become visible are painted first. Tiles left behind stay in the keep rect.
++        auto lead = [](int delta, int extra) { return delta > 0 ? extra / 2 : delta < 0 ? -extra / 2 : 0; };
++        coverRect.move(lead(m_scrollDelta.width(), extraX), lead(m_scrollDelta.height(), extraY));
++        keepRect.unite(coverRect);
+         ASSERT(keepRect.contains(coverRect));
+     }
+ 
+--- a/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreProxy.h
++++ b/Source/WebCore/platform/graphics/texmap/coordinated/CoordinatedBackingStoreProxy.h
+@@ -149,6 +149,7 @@
+     float m_contentsScale { 1 };
+     IntSize m_tileSize;
+     float m_coverAreaMultiplier { 2 };
++    IntSize m_scrollDelta;
+     bool m_pendingTileCreation { false };
+     IntRect m_contentsRect;
+     IntRect m_visibleRect;
