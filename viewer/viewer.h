@@ -11,5 +11,6 @@
 #define G_GNUC_END_IGNORE_DEPRECATIONS
 #define GTK_CSS_COMPILATION 1
 #include <gtk/gtk.h>
+#include <unistd.h>
 #include <wpe/webkit.h>
 #include <sitwebview.h>

@@ -1,0 +1,39 @@
+--- a/Source/WebKit/WebProcess/WebPage/WebPage.cpp
++++ b/Source/WebKit/WebProcess/WebPage/WebPage.cpp
+@@ -283,6 +283,7 @@
+ #include <WebCore/LoginStatus.h>
+ #include <WebCore/MIMETypeRegistry.h>
+ #include <WebCore/MediaDocument.h>
++#include <WebCore/MemoryRelease.h>
+ #include <WebCore/MediaPlayer.h>
+ #include <WebCore/MouseEvent.h>
+ #include <WebCore/NativeImage.h>
+@@ -522,6 +523,8 @@
+ #include <WebKitAdditions/WebPreferencesDefaultValuesAdditions.h>
+ #endif
+ 
++extern "C" __attribute__((weak)) size_t fotone_memory_page_out();
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+@@ -4830,6 +4833,19 @@
+     if (RefPtr mainFrame = m_mainFrame->coreLocalFrame())
+         mainFrame->detachFromAllOpenedFrames();
+     completionHandler(true);
++
++    bool visible = false;
++    Page::forEachPage([&](auto& other) {
++        visible = visible || other.isVisible();
++    });
++    if (!visible) {
++        WebCore::releaseMemory(Critical::Yes, Synchronous::Yes, MaintainBackForwardCache::Yes, MaintainMemoryCache::No);
++        if (fotone_memory_page_out) {
++            size_t bytes = fotone_memory_page_out();
++            WEBPAGE_RELEASE_LOG(Loading, "suspend: paged out %zu bytes", bytes);
++            UNUSED_PARAM(bytes);
++        }
++    }
+ }
+ 
+ void WebPage::resume(CompletionHandler<void(bool)>&& completionHandler)

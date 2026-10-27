@@ -49,6 +49,62 @@ pub export fn fotone_memory_pressure_level(used: c_int) c_int {
     return @intFromEnum(level(used, read()));
 }
 
+pub const Region = struct { start: usize, end: usize };
+
+pub fn anonymous(line: []const u8) ?Region {
+    var fields = std.mem.tokenizeScalar(u8, line, ' ');
+    const range = fields.next() orelse return null;
+    const perms = fields.next() orelse return null;
+    if (!std.mem.eql(u8, perms, "rw-p")) return null;
+    for (0..3) |_| _ = fields.next() orelse return null;
+    if (fields.next()) |name| {
+        if (!std.mem.eql(u8, name, "[heap]") and !std.mem.startsWith(u8, name, "[anon")) return null;
+    }
+    const dash = std.mem.indexOfScalar(u8, range, '-') orelse return null;
+    return .{
+        .start = std.fmt.parseInt(usize, range[0..dash], 16) catch return null,
+        .end = std.fmt.parseInt(usize, range[dash + 1 ..], 16) catch return null,
+    };
+}
+
+pub export fn fotone_memory_page_out() usize {
+    const linux = std.os.linux;
+    const rc = linux.open("/proc/self/maps", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return 0;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var buf: [65536]u8 = undefined;
+    var kept: usize = 0;
+    var total: usize = 0;
+    while (true) {
+        const n = linux.read(fd, buf[kept..].ptr, buf.len - kept);
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
+        const data = buf[0 .. kept + n];
+        const last = std.mem.lastIndexOfScalar(u8, data, '\n') orelse break;
+        var lines = std.mem.tokenizeScalar(u8, data[0..last], '\n');
+        while (lines.next()) |line| {
+            const r = anonymous(line) orelse continue;
+            if (linux.errno(linux.madvise(@ptrFromInt(r.start), r.end - r.start, linux.MADV.PAGEOUT)) == .SUCCESS) total += r.end - r.start;
+        }
+        kept = data.len - last - 1;
+        std.mem.copyForwards(u8, buf[0..kept], data[last + 1 ..]);
+    }
+    return total;
+}
+
+test "only private anonymous memory is paged out" {
+    try std.testing.expectEqual(Region{ .start = 0x1000, .end = 0x3000 }, anonymous("1000-3000 rw-p 00000000 00:00 0 ").?);
+    try std.testing.expectEqual(Region{ .start = 0x5000, .end = 0x6000 }, anonymous("5000-6000 rw-p 00000000 00:00 0                          [heap]").?);
+    try std.testing.expect(anonymous("1000-3000 r-xp 00000000 08:01 12 /usr/lib/libc.so.6") == null);
+    try std.testing.expect(anonymous("1000-3000 rw-s 00000000 00:05 7 /dev/dri/renderD128") == null);
+    try std.testing.expect(anonymous("1000-3000 rw-p 00000000 00:00 0 [stack]") == null);
+    try std.testing.expect(anonymous("1000-3000 rw-p 00001000 08:01 12 /usr/lib/libc.so.6") == null);
+}
+
+test "paging out the test process does not fail" {
+    _ = fotone_memory_page_out();
+}
+
 test "stall lines parse both averages" {
     const s = parse("some avg10=12.50 avg60=3.00 avg300=1.00 total=1234\nfull avg10=6.00 avg60=0.00 avg300=0.00 total=12\n");
     try std.testing.expectEqual(@as(f64, 12.5), s.some);
