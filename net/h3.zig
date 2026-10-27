@@ -44,16 +44,9 @@ pub fn parseAltSvc(value: []const u8) ?AltSvc {
     return null;
 }
 
-pub const Response = struct {
-    status: u16 = 0,
-    body: std.ArrayList(u8) = .empty,
-    handshake_ns: u64 = 0,
-    total_ns: u64 = 0,
-};
-
 pub const Error = error{ Resolve, Socket, Tls, Quic, Http3, Timeout, Closed };
 
-fn now() u64 {
+pub fn now() u64 {
     var ts: c.struct_timespec = undefined;
     _ = c.clock_gettime(c.CLOCK_MONOTONIC, &ts);
     return @as(u64, @intCast(ts.tv_sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.tv_nsec));
@@ -63,10 +56,26 @@ fn random(dest: [*c]u8, len: usize) void {
     _ = c.gnutls_rnd(c.GNUTLS_RND_RANDOM, dest, len);
 }
 
-const Client = struct {
+pub const Sink = struct {
+    ctx: ?*anyopaque,
+    header: *const fn (?*anyopaque, []const u8, []const u8) void,
+    data: *const fn (?*anyopaque, []const u8) void,
+    done: *const fn (?*anyopaque, bool) void,
+};
+
+pub const Request = struct {
+    method: []const u8,
+    path: []const u8,
+    headers: []const u8,
+    sink: Sink,
+    stream: i64 = -1,
+    finished: bool = false,
+};
+
+pub const Conn = struct {
     gpa: std.mem.Allocator,
-    url: Url,
     host_z: [:0]u8,
+    port: u16,
     fd: c_int = -1,
     local: c.struct_sockaddr_storage = undefined,
     local_len: c.socklen_t = @sizeOf(c.struct_sockaddr_storage),
@@ -78,20 +87,52 @@ const Client = struct {
     session: c.gnutls_session_t = null,
     cred: c.gnutls_certificate_credentials_t = null,
     ref: c.ngtcp2_crypto_conn_ref = undefined,
-    stream: i64 = -1,
-    finished: bool = false,
+    waiting: std.ArrayList(*Request) = .empty,
+    active: usize = 0,
     start: u64 = 0,
-    response: *Response,
+    handshake_ns: u64 = 0,
+    broken: bool = false,
 
-    fn of(user: ?*anyopaque) *Client {
+    fn of(user: ?*anyopaque) *Conn {
         return @ptrCast(@alignCast(user.?));
     }
 
-    fn resolve(self: *Client) Error!void {
+    fn req(stream_user: ?*anyopaque) ?*Request {
+        return @ptrCast(@alignCast(stream_user orelse return null));
+    }
+
+    pub fn open(gpa: std.mem.Allocator, host: []const u8, port: u16) Error!*Conn {
+        const self = gpa.create(Conn) catch return error.Resolve;
+        self.* = .{ .gpa = gpa, .host_z = gpa.dupeZ(u8, host) catch {
+            gpa.destroy(self);
+            return error.Resolve;
+        }, .port = port };
+        self.start = now();
+        errdefer self.close();
+        try self.resolve();
+        try self.setupTls();
+        try self.setupQuic();
+        try self.flush();
+        return self;
+    }
+
+    pub fn close(self: *Conn) void {
+        for (self.waiting.items) |r| r.sink.done(r.sink.ctx, false);
+        self.waiting.deinit(self.gpa);
+        if (self.h3) |h| c.nghttp3_conn_del(h);
+        if (self.conn) |q| c.ngtcp2_conn_del(q);
+        if (self.session != null) c.gnutls_deinit(self.session);
+        if (self.cred != null) c.gnutls_certificate_free_credentials(self.cred);
+        if (self.fd >= 0) _ = c.close(self.fd);
+        self.gpa.free(self.host_z);
+        self.gpa.destroy(self);
+    }
+
+    fn resolve(self: *Conn) Error!void {
         var hints = std.mem.zeroes(c.struct_addrinfo);
         hints.ai_socktype = c.SOCK_DGRAM;
         var port_buf: [8]u8 = undefined;
-        const port = std.fmt.bufPrintZ(&port_buf, "{d}", .{self.url.port}) catch return error.Resolve;
+        const port = std.fmt.bufPrintZ(&port_buf, "{d}", .{self.port}) catch return error.Resolve;
         var res: ?*c.struct_addrinfo = null;
         if (c.getaddrinfo(self.host_z.ptr, port.ptr, &hints, &res) != 0) return error.Resolve;
         defer c.freeaddrinfo(res);
@@ -116,7 +157,7 @@ const Client = struct {
         return of(ref.*.user_data).conn;
     }
 
-    fn setupTls(self: *Client) Error!void {
+    fn setupTls(self: *Conn) Error!void {
         if (c.gnutls_certificate_allocate_credentials(&self.cred) != 0) return error.Tls;
         if (c.gnutls_certificate_set_x509_system_trust(self.cred) < 0) return error.Tls;
         if (c.gnutls_init(&self.session, c.GNUTLS_CLIENT | c.GNUTLS_ENABLE_EARLY_DATA | c.GNUTLS_NO_END_OF_EARLY_DATA) != 0) return error.Tls;
@@ -145,12 +186,17 @@ const Client = struct {
 
     fn onHandshake(_: ?*c.ngtcp2_conn, user: ?*anyopaque) callconv(.c) c_int {
         const self = of(user);
-        self.response.handshake_ns = now() - self.start;
+        self.handshake_ns = now() - self.start;
         self.setupHttp3() catch return c.NGTCP2_ERR_CALLBACK_FAILURE;
         return 0;
     }
 
-    fn consume(self: *Client, stream: i64, n: usize) void {
+    fn onMoreStreams(_: ?*c.ngtcp2_conn, _: u64, user: ?*anyopaque) callconv(.c) c_int {
+        of(user).submitWaiting();
+        return 0;
+    }
+
+    fn consume(self: *Conn, stream: i64, n: usize) void {
         _ = c.ngtcp2_conn_extend_max_stream_offset(self.conn, stream, n);
         c.ngtcp2_conn_extend_max_offset(self.conn, n);
     }
@@ -192,7 +238,7 @@ const Client = struct {
         return if (c.nghttp3_conn_unblock_stream(h3, stream) != 0) c.NGTCP2_ERR_CALLBACK_FAILURE else 0;
     }
 
-    fn setupQuic(self: *Client) Error!void {
+    fn setupQuic(self: *Conn) Error!void {
         var cb = std.mem.zeroes(c.ngtcp2_callbacks);
         cb.client_initial = c.ngtcp2_crypto_client_initial_cb;
         cb.recv_crypto_data = c.ngtcp2_crypto_recv_crypto_data_cb;
@@ -208,6 +254,7 @@ const Client = struct {
         cb.rand = onRand;
         cb.get_new_connection_id = onNewCid;
         cb.handshake_completed = onHandshake;
+        cb.extend_max_local_streams_bidi = onMoreStreams;
         cb.recv_stream_data = onStreamData;
         cb.acked_stream_data_offset = onAcked;
         cb.stream_close = onStreamClose;
@@ -221,9 +268,10 @@ const Client = struct {
         var params: c.ngtcp2_transport_params = undefined;
         c.ngtcp2_transport_params_default_versioned(c.NGTCP2_TRANSPORT_PARAMS_VERSION, &params);
         params.initial_max_streams_uni = 3;
-        params.initial_max_stream_data_bidi_local = 1 << 20;
+        params.initial_max_stream_data_bidi_local = 4 << 20;
         params.initial_max_stream_data_uni = 1 << 20;
-        params.initial_max_data = 8 << 20;
+        params.initial_max_data = 32 << 20;
+        params.max_idle_timeout = 30 * std.time.ns_per_s;
 
         var dcid: c.ngtcp2_cid = undefined;
         var scid: c.ngtcp2_cid = undefined;
@@ -240,20 +288,18 @@ const Client = struct {
         c.ngtcp2_conn_set_tls_native_handle(self.conn, self.session);
     }
 
-    fn onHeader(_: ?*c.nghttp3_conn, stream: i64, _: i32, name: ?*c.nghttp3_rcbuf, value: ?*c.nghttp3_rcbuf, _: u8, user: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-        const self = of(user);
-        if (stream != self.stream) return 0;
+    fn onHeader(_: ?*c.nghttp3_conn, _: i64, _: i32, name: ?*c.nghttp3_rcbuf, value: ?*c.nghttp3_rcbuf, _: u8, _: ?*anyopaque, stream_user: ?*anyopaque) callconv(.c) c_int {
+        const r = req(stream_user) orelse return 0;
         const n = c.nghttp3_rcbuf_get_buf(name);
-        if (!std.mem.eql(u8, n.base[0..n.len], ":status")) return 0;
         const v = c.nghttp3_rcbuf_get_buf(value);
-        self.response.status = std.fmt.parseInt(u16, v.base[0..v.len], 10) catch 0;
+        r.sink.header(r.sink.ctx, n.base[0..n.len], v.base[0..v.len]);
         return 0;
     }
 
-    fn onData(_: ?*c.nghttp3_conn, stream: i64, data: [*c]const u8, len: usize, user: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-        const self = of(user);
-        self.consume(stream, len);
-        if (stream == self.stream) self.response.body.appendSlice(self.gpa, data[0..len]) catch return c.NGHTTP3_ERR_CALLBACK_FAILURE;
+    fn onData(_: ?*c.nghttp3_conn, stream: i64, data: [*c]const u8, len: usize, user: ?*anyopaque, stream_user: ?*anyopaque) callconv(.c) c_int {
+        of(user).consume(stream, len);
+        const r = req(stream_user) orelse return 0;
+        r.sink.data(r.sink.ctx, data[0..len]);
         return 0;
     }
 
@@ -262,9 +308,22 @@ const Client = struct {
         return 0;
     }
 
-    fn onEnd(_: ?*c.nghttp3_conn, stream: i64, user: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-        const self = of(user);
-        if (stream == self.stream) self.finished = true;
+    fn finish(self: *Conn, r: *Request, ok: bool) void {
+        if (r.finished) return;
+        r.finished = true;
+        self.active -= 1;
+        r.sink.done(r.sink.ctx, ok);
+    }
+
+    fn onEnd(_: ?*c.nghttp3_conn, _: i64, user: ?*anyopaque, stream_user: ?*anyopaque) callconv(.c) c_int {
+        const r = req(stream_user) orelse return 0;
+        of(user).finish(r, true);
+        return 0;
+    }
+
+    fn onH3Close(_: ?*c.nghttp3_conn, _: i64, _: u64, user: ?*anyopaque, stream_user: ?*anyopaque) callconv(.c) c_int {
+        const r = req(stream_user) orelse return 0;
+        of(user).finish(r, false);
         return 0;
     }
 
@@ -272,12 +331,13 @@ const Client = struct {
         return 0;
     }
 
-    fn setupHttp3(self: *Client) Error!void {
+    fn setupHttp3(self: *Conn) Error!void {
         var cb = std.mem.zeroes(c.nghttp3_callbacks);
         cb.recv_header = onHeader;
         cb.recv_data = onData;
         cb.deferred_consume = onDeferred;
         cb.end_stream = onEnd;
+        cb.stream_close = onH3Close;
         cb.acked_stream_data = onH3Acked;
         var settings: c.nghttp3_settings = undefined;
         c.nghttp3_settings_default_versioned(c.NGHTTP3_SETTINGS_VERSION, &settings);
@@ -290,26 +350,74 @@ const Client = struct {
         if (c.ngtcp2_conn_open_uni_stream(self.conn, &enc, null) != 0) return error.Http3;
         if (c.ngtcp2_conn_open_uni_stream(self.conn, &dec, null) != 0) return error.Http3;
         if (c.nghttp3_conn_bind_qpack_streams(self.h3, enc, dec) != 0) return error.Http3;
-        if (c.ngtcp2_conn_open_bidi_stream(self.conn, &self.stream, null) != 0) return error.Http3;
-        const headers = [_][2][]const u8{
-            .{ ":method", "GET" },
-            .{ ":scheme", "https" },
-            .{ ":authority", self.url.host },
-            .{ ":path", self.url.path },
-            .{ "user-agent", "fotone-h3" },
-        };
-        var nva: [headers.len]c.nghttp3_nv = undefined;
-        for (headers, 0..) |h, i| nva[i] = .{
-            .name = @constCast(h[0].ptr),
-            .namelen = h[0].len,
-            .value = @constCast(h[1].ptr),
-            .valuelen = h[1].len,
-            .flags = c.NGHTTP3_NV_FLAG_NONE,
-        };
-        if (c.nghttp3_conn_submit_request(self.h3, self.stream, &nva, nva.len, null, null) != 0) return error.Http3;
+        self.submitWaiting();
     }
 
-    fn flush(self: *Client) Error!void {
+    pub fn ready(self: *const Conn) bool {
+        return self.h3 != null;
+    }
+
+    pub fn submit(self: *Conn, r: *Request) void {
+        self.waiting.append(self.gpa, r) catch return r.sink.done(r.sink.ctx, false);
+        self.active += 1;
+        if (self.h3 != null) self.submitWaiting();
+    }
+
+    fn submitWaiting(self: *Conn) void {
+        const h3 = self.h3 orelse return;
+        while (self.waiting.items.len > 0) {
+            const r = self.waiting.items[0];
+            if (c.ngtcp2_conn_open_bidi_stream(self.conn, &r.stream, r) != 0) return;
+            _ = self.waiting.orderedRemove(0);
+            if (submitRequest(self, h3, r)) |_| {} else |_| {
+                self.finish(r, false);
+            }
+        }
+    }
+
+    fn submitRequest(self: *Conn, h3: *c.nghttp3_conn, r: *Request) Error!void {
+        var nva: [48]c.nghttp3_nv = undefined;
+        var n: usize = 0;
+        const fixed = [_][2][]const u8{
+            .{ ":method", r.method },
+            .{ ":scheme", "https" },
+            .{ ":authority", self.host_z },
+            .{ ":path", r.path },
+        };
+        for (fixed) |h| {
+            nva[n] = nv(h[0], h[1]);
+            n += 1;
+        }
+        var it = std.mem.splitScalar(u8, r.headers, 0);
+        while (n < nva.len) {
+            const name = it.next() orelse break;
+            const value = it.next() orelse break;
+            if (name.len == 0) break;
+            nva[n] = nv(name, value);
+            n += 1;
+        }
+        if (c.nghttp3_conn_submit_request(h3, r.stream, &nva, n, null, r) != 0) return error.Http3;
+    }
+
+    fn nv(name: []const u8, value: []const u8) c.nghttp3_nv {
+        return .{ .name = @constCast(name.ptr), .namelen = name.len, .value = @constCast(value.ptr), .valuelen = value.len, .flags = c.NGHTTP3_NV_FLAG_NONE };
+    }
+
+    pub fn cancel(self: *Conn, r: *Request) void {
+        if (r.finished) return;
+        for (self.waiting.items, 0..) |w, i| if (w == r) {
+            _ = self.waiting.orderedRemove(i);
+            r.finished = true;
+            self.active -= 1;
+            return;
+        };
+        r.finished = true;
+        self.active -= 1;
+        if (self.h3) |h3| _ = c.nghttp3_conn_set_stream_user_data(h3, r.stream, null);
+        _ = c.ngtcp2_conn_shutdown_stream(self.conn, 0, r.stream, c.NGHTTP3_H3_REQUEST_CANCELLED);
+    }
+
+    pub fn flush(self: *Conn) Error!void {
         var buf: [1452]u8 = undefined;
         var ps: c.ngtcp2_path_storage = undefined;
         c.ngtcp2_path_storage_zero(&ps);
@@ -355,7 +463,7 @@ const Client = struct {
         }
     }
 
-    fn receive(self: *Client) Error!void {
+    pub fn receive(self: *Conn) Error!void {
         var buf: [65536]u8 = undefined;
         while (true) {
             const n = c.recv(self.fd, &buf, buf.len, 0);
@@ -367,50 +475,71 @@ const Client = struct {
         }
     }
 
-    fn run(self: *Client, timeout_ns: u64) Error!void {
-        try self.flush();
-        while (!self.finished) {
-            const t = now();
-            if (t - self.start > timeout_ns) return error.Timeout;
-            const expiry = c.ngtcp2_conn_get_expiry(self.conn);
-            const wait_ms: c_int = if (expiry <= t) 0 else @intCast(@min((expiry - t) / std.time.ns_per_ms + 1, 200));
-            var pfd = c.struct_pollfd{ .fd = self.fd, .events = c.POLLIN, .revents = 0 };
-            const ready = c.poll(&pfd, 1, wait_ms);
-            if (ready > 0) {
-                try self.receive();
-            } else if (c.ngtcp2_conn_get_expiry(self.conn) <= now()) {
-                const rv = c.ngtcp2_conn_handle_expiry(self.conn, now());
-                if (rv != 0) return error.Quic;
-            }
-            try self.flush();
-        }
-        self.response.total_ns = now() - self.start;
+    pub fn timeoutMs(self: *Conn, cap: u64) c_int {
+        const t = now();
+        const expiry = c.ngtcp2_conn_get_expiry(self.conn);
+        return if (expiry <= t) 0 else @intCast(@min((expiry - t) / std.time.ns_per_ms + 1, cap));
     }
 
-    fn deinit(self: *Client) void {
-        if (self.h3) |h| c.nghttp3_conn_del(h);
-        if (self.conn) |q| c.ngtcp2_conn_del(q);
-        if (self.session != null) c.gnutls_deinit(self.session);
-        if (self.cred != null) c.gnutls_certificate_free_credentials(self.cred);
-        if (self.fd >= 0) _ = c.close(self.fd);
-        self.gpa.free(self.host_z);
+    pub fn tick(self: *Conn, readable: bool) Error!void {
+        if (readable) {
+            try self.receive();
+        } else if (c.ngtcp2_conn_get_expiry(self.conn) <= now()) {
+            if (c.ngtcp2_conn_handle_expiry(self.conn, now()) != 0) return error.Quic;
+        }
+        try self.flush();
+    }
+
+    pub fn failAll(self: *Conn) void {
+        self.broken = true;
+        for (self.waiting.items) |r| {
+            r.finished = true;
+            r.sink.done(r.sink.ctx, false);
+        }
+        self.waiting.clearRetainingCapacity();
     }
 };
 
-pub fn get(gpa: std.mem.Allocator, url: []const u8, timeout_ns: u64, response: *Response) Error!void {
-    const parsed = parseUrl(url) orelse return error.Resolve;
-    var client = Client{
-        .gpa = gpa,
-        .url = parsed,
-        .host_z = gpa.dupeZ(u8, parsed.host) catch return error.Resolve,
-        .response = response,
-    };
-    defer client.deinit();
-    client.start = now();
-    try client.resolve();
-    try client.setupTls();
-    try client.setupQuic();
-    try client.run(timeout_ns);
+pub const Response = struct {
+    status: u16 = 0,
+    body: std.ArrayList(u8) = .empty,
+    gpa: std.mem.Allocator,
+    finished: bool = false,
+    ok: bool = false,
+
+    fn of(ctx: ?*anyopaque) *Response {
+        return @ptrCast(@alignCast(ctx.?));
+    }
+
+    fn header(ctx: ?*anyopaque, name: []const u8, value: []const u8) void {
+        if (std.mem.eql(u8, name, ":status")) of(ctx).status = std.fmt.parseInt(u16, value, 10) catch 0;
+    }
+
+    fn data(ctx: ?*anyopaque, bytes: []const u8) void {
+        const self = of(ctx);
+        self.body.appendSlice(self.gpa, bytes) catch {};
+    }
+
+    fn done(ctx: ?*anyopaque, ok: bool) void {
+        of(ctx).finished = true;
+        of(ctx).ok = ok;
+    }
+
+    pub fn sink(self: *Response) Sink {
+        return .{ .ctx = self, .header = header, .data = data, .done = done };
+    }
+};
+
+pub fn fetch(conn: *Conn, requests: []Request, timeout_ns: u64) Error!void {
+    for (requests) |*r| conn.submit(r);
+    try conn.flush();
+    const start = now();
+    while (conn.active > 0) {
+        if (now() - start > timeout_ns) return error.Timeout;
+        var pfd = c.struct_pollfd{ .fd = conn.fd, .events = c.POLLIN, .revents = 0 };
+        const ready = c.poll(&pfd, 1, conn.timeoutMs(200));
+        try conn.tick(ready > 0);
+    }
 }
 
 test "urls split into host, port and path" {
