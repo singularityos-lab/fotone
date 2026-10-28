@@ -17,6 +17,9 @@ var perf = false;
 var perf_polls: u32 = 0;
 var suspend_test = false;
 var rss_before: u64 = 0;
+var user_agent: ?[*:0]const u8 = null;
+var load_times = false;
+var started: i64 = 0;
 
 extern fn webkit_fotone_web_view_set_suspended(web: ?*c.WebKitWebView, suspended: c.gboolean) void;
 
@@ -166,8 +169,31 @@ fn suspendNow(_: c.gpointer) callconv(.c) c.gboolean {
     return 0;
 }
 
-fn loaded(_: ?*c.WebKitWebView, event: c.WebKitLoadEvent, _: c.gpointer) callconv(.c) void {
+fn timesRead(src: [*c]c.GObject, res: ?*c.GAsyncResult, _: c.gpointer) callconv(.c) void {
+    var err: [*c]c.GError = null;
+    const value = c.webkit_web_view_evaluate_javascript_finish(@ptrCast(@alignCast(src)), res, &err) orelse {
+        c.g_error_free(err);
+        return;
+    };
+    defer c.g_object_unref(value);
+    const text = c.jsc_value_to_string(value);
+    defer c.g_free(text);
+    c.g_print("page %s\n", text);
+}
+
+const TIMES_SCRIPT =
+    \\JSON.stringify({ resources: performance.getEntriesByType('resource').length,
+    \\  bytes: performance.getEntriesByType('resource').reduce((s, r) => s + (r.transferSize || r.encodedBodySize || 0), 0),
+    \\  script_ms: performance.getEntriesByType('resource').filter(r => r.initiatorType === 'script').reduce((s, r) => s + r.duration, 0) })
+;
+
+fn loaded(web: ?*c.WebKitWebView, event: c.WebKitLoadEvent, _: c.gpointer) callconv(.c) void {
     if (event != c.WEBKIT_LOAD_FINISHED) return;
+    if (load_times) {
+        const elapsed = @divTrunc(c.g_get_monotonic_time() - started, 1000);
+        c.g_print("load %ld %s\n", @as(c_long, @intCast(elapsed)), c.webkit_web_view_get_uri(web));
+        c.webkit_web_view_evaluate_javascript(web, TIMES_SCRIPT, -1, null, null, null, timesRead, null);
+    }
     if (translate) c.sit_web_view_translate(view);
     if (dump) _ = c.g_timeout_add(3000, readText, null);
     if (perf) _ = c.g_timeout_add(PERF_POLL_MS, perfPoll, null);
@@ -206,6 +232,8 @@ fn activate(app: ?*c.GtkApplication, _: c.gpointer) callconv(.c) void {
     _ = c.g_object_bind_property(c.sit_web_view_get_web_view(view), "title", win, "title", c.G_BINDING_SYNC_CREATE);
     c.gtk_window_set_child(@ptrCast(win), child);
     _ = c.g_signal_connect_data(c.sit_web_view_get_web_view(view), "load-changed", @ptrCast(&loaded), null, null, 0);
+    if (user_agent) |ua| c.webkit_settings_set_user_agent(c.webkit_web_view_get_settings(c.sit_web_view_get_web_view(view)), ua);
+    started = c.g_get_monotonic_time();
     if (extension) |path| {
         var err: [*c]c.GError = null;
         const id = c.sit_web_view_install_extension(path, &err);
@@ -235,6 +263,11 @@ pub fn main(init: std.process.Init) !u8 {
         } else if (std.mem.eql(u8, args[i], "--extension") and i + 1 < args.len) {
             extension = try arena.dupeZ(u8, args[i + 1]);
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--user-agent") and i + 1 < args.len) {
+            user_agent = try arena.dupeZ(u8, args[i + 1]);
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--load-times")) {
+            load_times = true;
         } else if (std.mem.eql(u8, args[i], "--dump")) {
             dump = true;
         } else if (std.mem.eql(u8, args[i], "--perf")) {
