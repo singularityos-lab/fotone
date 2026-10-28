@@ -1,0 +1,281 @@
+--- a/Source/WebCore/platform/mediastream/libwebrtc/gstreamer/LibWebRTCProviderGStreamer.cpp
++++ b/Source/WebCore/platform/mediastream/libwebrtc/gstreamer/LibWebRTCProviderGStreamer.cpp
+@@ -32,6 +32,21 @@
+ #include "GStreamerVideoEncoderFactory.h"
+ #include <webrtc/api/video_codecs/builtin_video_decoder_factory.h>
+ #include <webrtc/api/video_codecs/builtin_video_encoder_factory.h>
++#include <webrtc/api/video/i420_buffer.h>
++#include <webrtc/modules/video_coding/codecs/interface/common_constants.h>
++#include <webrtc/modules/video_coding/include/video_codec_interface.h>
++#include <webrtc/modules/video_coding/include/video_error_codes.h>
++
++struct FotoneVaEncoder;
++struct FotoneVaDecoder;
++extern "C" __attribute__((weak)) FotoneVaEncoder* fotone_vaenc_open(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate);
++extern "C" __attribute__((weak)) void fotone_vaenc_set_rates(FotoneVaEncoder*, uint32_t bitrate, uint32_t fps);
++extern "C" __attribute__((weak)) int fotone_vaenc_encode(FotoneVaEncoder*, const uint8_t* y, int strideY, const uint8_t* u, int strideU, const uint8_t* v, int strideV, int forceKey, const uint8_t** out, size_t* outLength, int* key);
++extern "C" __attribute__((weak)) void fotone_vaenc_close(FotoneVaEncoder*);
++extern "C" __attribute__((weak)) FotoneVaDecoder* fotone_vadec_open();
++extern "C" __attribute__((weak)) int fotone_vadec_decode(FotoneVaDecoder*, const uint8_t* data, size_t length, uint32_t* width, uint32_t* height);
++extern "C" __attribute__((weak)) int fotone_vadec_frame(FotoneVaDecoder*, uint8_t* y, int strideY, uint8_t* u, int strideU, uint8_t* v, int strideV);
++extern "C" __attribute__((weak)) void fotone_vadec_close(FotoneVaDecoder*);
+ 
+ namespace WebCore {
+ 
+@@ -84,14 +99,254 @@
+     std::unique_ptr<Factory> m_fallback;
+ };
+ 
++static webrtc::SdpVideoFormat hardwareH264Format()
++{
++    return webrtc::SdpVideoFormat("H264", { { "level-asymmetry-allowed", "1" }, { "packetization-mode", "1" }, { "profile-level-id", "42e01f" } });
++}
++
++static bool hasHardwareH264()
++{
++    static const bool available = [] {
++        if (!fotone_vaenc_open || !fotone_vadec_open)
++            return false;
++        if (auto* disabled = getenv("FOTONE_WEBRTC_HARDWARE"); disabled && !strcmp(disabled, "0"))
++            return false;
++        auto* encoder = fotone_vaenc_open(320, 240, 30, 500000);
++        if (!encoder)
++            return false;
++        fotone_vaenc_close(encoder);
++        auto* decoder = fotone_vadec_open();
++        if (!decoder)
++            return false;
++        fotone_vadec_close(decoder);
++        return true;
++    }();
++    return available;
++}
++
++class HardwareH264Encoder final : public webrtc::VideoEncoder {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(HardwareH264Encoder);
++public:
++    ~HardwareH264Encoder()
++    {
++        Release();
++    }
++
++    int InitEncode(const webrtc::VideoCodec* codec, const webrtc::VideoEncoder::Settings&) final
++    {
++        Release();
++        if (!codec || codec->codecType != webrtc::kVideoCodecH264)
++            return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
++        m_fps = codec->maxFramerate ? codec->maxFramerate : 30;
++        m_bitrate = std::max(codec->startBitrate, 100u) * 1000;
++        return open(codec->width, codec->height) ? WEBRTC_VIDEO_CODEC_OK : WEBRTC_VIDEO_CODEC_ERROR;
++    }
++
++    int32_t RegisterEncodeCompleteCallback(webrtc::EncodedImageCallback* callback) final
++    {
++        m_callback = callback;
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
++
++    int32_t Release() final
++    {
++        if (m_encoder)
++            fotone_vaenc_close(m_encoder);
++        m_encoder = nullptr;
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
++
++    int32_t Encode(const webrtc::VideoFrame& frame, const std::vector<webrtc::VideoFrameType>* frameTypes) final
++    {
++        if (!m_encoder || !m_callback)
++            return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
++        auto buffer = frame.video_frame_buffer()->ToI420();
++        if (!buffer)
++            return WEBRTC_VIDEO_CODEC_ERROR;
++        if (static_cast<uint32_t>(buffer->width()) != m_width || static_cast<uint32_t>(buffer->height()) != m_height) {
++            if (!open(buffer->width(), buffer->height()))
++                return WEBRTC_VIDEO_CODEC_ERROR;
++        }
++        bool forceKey = std::exchange(m_forceKey, false);
++        if (frameTypes)
++            forceKey |= std::ranges::find(*frameTypes, webrtc::VideoFrameType::kVideoFrameKey) != frameTypes->end();
++        const uint8_t* data = nullptr;
++        size_t length = 0;
++        int key = 0;
++        if (fotone_vaenc_encode(m_encoder, buffer->DataY(), buffer->StrideY(), buffer->DataU(), buffer->StrideU(), buffer->DataV(), buffer->StrideV(), forceKey, &data, &length, &key) < 0) {
++            m_forceKey = true;
++            return WEBRTC_VIDEO_CODEC_ERROR;
++        }
++        if (!length)
++            return WEBRTC_VIDEO_CODEC_OK;
++
++        webrtc::EncodedImage image;
++        image.SetEncodedData(webrtc::EncodedImageBuffer::Create(data, length));
++        image._encodedWidth = m_width;
++        image._encodedHeight = m_height;
++        image.SetRtpTimestamp(frame.rtp_timestamp());
++        image.capture_time_ms_ = frame.render_time_ms();
++        image.rotation_ = frame.rotation();
++        image.SetFrameType(key ? webrtc::VideoFrameType::kVideoFrameKey : webrtc::VideoFrameType::kVideoFrameDelta);
++
++        webrtc::CodecSpecificInfo info;
++        info.codecType = webrtc::kVideoCodecH264;
++        info.codecSpecific.H264.packetization_mode = webrtc::H264PacketizationMode::NonInterleaved;
++        info.codecSpecific.H264.temporal_idx = webrtc::kNoTemporalIdx;
++        info.codecSpecific.H264.base_layer_sync = false;
++        info.codecSpecific.H264.idr_frame = key;
++        m_callback->OnEncodedImage(image, &info);
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
++
++    void SetRates(const webrtc::VideoEncoder::RateControlParameters& parameters) final
++    {
++        if (parameters.bitrate.get_sum_bps())
++            m_bitrate = parameters.bitrate.get_sum_bps();
++        if (parameters.framerate_fps >= 1)
++            m_fps = std::lround(parameters.framerate_fps);
++        if (m_encoder)
++            fotone_vaenc_set_rates(m_encoder, m_bitrate, m_fps);
++    }
++
++    EncoderInfo GetEncoderInfo() const final
++    {
++        EncoderInfo info;
++        info.implementation_name = "Fotone VA-API";
++        info.is_hardware_accelerated = true;
++        info.supports_native_handle = false;
++        info.supports_simulcast = false;
++        info.requested_resolution_alignment = 2;
++        return info;
++    }
++
++private:
++    bool open(uint32_t width, uint32_t height)
++    {
++        Release();
++        m_width = width;
++        m_height = height;
++        m_encoder = fotone_vaenc_open(width, height, m_fps, m_bitrate);
++        m_forceKey = true;
++        return m_encoder;
++    }
++
++    FotoneVaEncoder* m_encoder { nullptr };
++    webrtc::EncodedImageCallback* m_callback { nullptr };
++    uint32_t m_width { 0 };
++    uint32_t m_height { 0 };
++    uint32_t m_fps { 30 };
++    uint32_t m_bitrate { 500000 };
++    bool m_forceKey { true };
++};
++
++class HardwareH264Decoder final : public webrtc::VideoDecoder {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(HardwareH264Decoder);
++public:
++    ~HardwareH264Decoder()
++    {
++        Release();
++    }
++
++    bool Configure(const Settings&) final
++    {
++        Release();
++        m_decoder = fotone_vadec_open();
++        return m_decoder;
++    }
++
++    int32_t Decode(const webrtc::EncodedImage& image, int64_t) final
++    {
++        if (!m_decoder || !m_callback)
++            return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
++        if (!image.data() || !image.size())
++            return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
++        uint32_t width = 0;
++        uint32_t height = 0;
++        int decoded = fotone_vadec_decode(m_decoder, image.data(), image.size(), &width, &height);
++        if (decoded < 0)
++            return WEBRTC_VIDEO_CODEC_ERROR;
++        if (!decoded)
++            return WEBRTC_VIDEO_CODEC_OK;
++        auto buffer = webrtc::I420Buffer::Create(width, height);
++        if (fotone_vadec_frame(m_decoder, buffer->MutableDataY(), buffer->StrideY(), buffer->MutableDataU(), buffer->StrideU(), buffer->MutableDataV(), buffer->StrideV()) < 0)
++            return WEBRTC_VIDEO_CODEC_ERROR;
++        auto frame = webrtc::VideoFrame::Builder().set_video_frame_buffer(buffer).set_rtp_timestamp(image.RtpTimestamp()).set_rotation(image.rotation_).build();
++        m_callback->Decoded(frame, std::nullopt, std::nullopt);
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
++
++    int32_t RegisterDecodeCompleteCallback(webrtc::DecodedImageCallback* callback) final
++    {
++        m_callback = callback;
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
++
++    int32_t Release() final
++    {
++        if (m_decoder)
++            fotone_vadec_close(m_decoder);
++        m_decoder = nullptr;
++        return WEBRTC_VIDEO_CODEC_OK;
++    }
++
++    DecoderInfo GetDecoderInfo() const final
++    {
++        return { .implementation_name = "Fotone VA-API", .is_hardware_accelerated = true };
++    }
++
++    const char* ImplementationName() const final
++    {
++        return "Fotone VA-API";
++    }
++
++private:
++    FotoneVaDecoder* m_decoder { nullptr };
++    webrtc::DecodedImageCallback* m_callback { nullptr };
++};
++
++class HardwareH264EncoderFactory final : public webrtc::VideoEncoderFactory {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(HardwareH264EncoderFactory);
++public:
++    std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const final
++    {
++        if (!hasHardwareH264())
++            return { };
++        return { hardwareH264Format() };
++    }
++
++    std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat&) final
++    {
++        return makeUnique<HardwareH264Encoder>();
++    }
++};
++
++class HardwareH264DecoderFactory final : public webrtc::VideoDecoderFactory {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(HardwareH264DecoderFactory);
++public:
++    std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const final
++    {
++        if (!hasHardwareH264())
++            return { };
++        return { hardwareH264Format() };
++    }
++
++    std::unique_ptr<webrtc::VideoDecoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat&) final
++    {
++        return makeUnique<HardwareH264Decoder>();
++    }
++};
++
+ std::unique_ptr<webrtc::VideoDecoderFactory> LibWebRTCProviderGStreamer::createDecoderFactory()
+ {
+-    return makeUnique<FallbackVideoFactory<webrtc::VideoDecoderFactory, webrtc::VideoDecoder>>(makeUnique<GStreamerVideoDecoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2()), webrtc::CreateBuiltinVideoDecoderFactory());
++    using Factory = FallbackVideoFactory<webrtc::VideoDecoderFactory, webrtc::VideoDecoder>;
++    return makeUnique<Factory>(makeUnique<HardwareH264DecoderFactory>(), makeUnique<Factory>(makeUnique<GStreamerVideoDecoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2()), webrtc::CreateBuiltinVideoDecoderFactory()));
+ }
+ 
+ std::unique_ptr<webrtc::VideoEncoderFactory> LibWebRTCProviderGStreamer::createEncoderFactory()
+ {
+-    return makeUnique<FallbackVideoFactory<webrtc::VideoEncoderFactory, webrtc::VideoEncoder>>(makeUnique<GStreamerVideoEncoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2()), webrtc::CreateBuiltinVideoEncoderFactory());
++    using Factory = FallbackVideoFactory<webrtc::VideoEncoderFactory, webrtc::VideoEncoder>;
++    return makeUnique<Factory>(makeUnique<HardwareH264EncoderFactory>(), makeUnique<Factory>(makeUnique<GStreamerVideoEncoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2()), webrtc::CreateBuiltinVideoEncoderFactory()));
+ }
+ 
+ } // namespace WebCore
