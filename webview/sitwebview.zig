@@ -380,7 +380,45 @@ fn check(_: c.gpointer) callconv(.c) c.gboolean {
         sleep(oldest);
         if (oldest.state == null) break;
     }
+    limitSites(list, memory.siteLimit(p));
     return 1;
+}
+
+fn siteOf(w: *WebView) ?[*:0]u8 {
+    const web = w.web orelse return null;
+    const uri = c.webkit_web_view_get_uri(web) orelse return null;
+    const parsed = c.g_uri_parse(uri, c.G_URI_FLAGS_NONE, null) orelse return null;
+    defer c.g_uri_unref(parsed);
+    const host = c.g_uri_get_host(parsed) orelse return null;
+    const base = c.soup_tld_get_base_domain(host, null);
+    return c.g_strdup(if (base != null) base else host);
+}
+
+fn limitSites(list: *c.GPtrArray, limit: usize) void {
+    var i: c.guint = 0;
+    while (i < list.*.len) : (i += 1) {
+        const site = siteOf(of(list.*.pdata[i])) orelse continue;
+        defer c.g_free(site);
+        while (true) {
+            var count: usize = 0;
+            var oldest: ?*WebView = null;
+            var j: c.guint = 0;
+            while (j < list.*.len) : (j += 1) {
+                const w = of(list.*.pdata[j]);
+                if (w.hidden_at == 0 or w.state != null or w.texture == null or busy(w)) continue;
+                const other = siteOf(w) orelse continue;
+                defer c.g_free(other);
+                if (c.g_strcmp0(site, other) != 0) continue;
+                count += 1;
+                if (oldest == null or w.hidden_at < oldest.?.hidden_at) oldest = w;
+            }
+            if (count <= limit) break;
+            const w = oldest orelse break;
+            thaw(w);
+            sleep(w);
+            if (w.state == null) break;
+        }
+    }
 }
 
 fn oldestHidden(list: *c.GPtrArray) ?*WebView {

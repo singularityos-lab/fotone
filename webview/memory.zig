@@ -61,6 +61,10 @@ pub fn shouldSleep(hidden_for: i64, current_pressure: f64) bool {
     return hidden_for >= idle_us and current_pressure >= pressure_limit;
 }
 
+pub fn siteLimit(current_pressure: f64) usize {
+    return if (current_pressure >= pressure_limit) 1 else 2;
+}
+
 pub fn shouldFreeze(hidden_for: i64, busy: bool) bool {
     return !busy and hidden_for >= freeze_us;
 }
@@ -69,6 +73,11 @@ test "hidden views freeze after a short grace unless busy" {
     try std.testing.expect(!shouldFreeze(freeze_us - 1, false));
     try std.testing.expect(shouldFreeze(freeze_us, false));
     try std.testing.expect(!shouldFreeze(forced_us, true));
+}
+
+test "a site keeps fewer hidden views awake under pressure" {
+    try std.testing.expectEqual(@as(usize, 2), siteLimit(0));
+    try std.testing.expectEqual(@as(usize, 1), siteLimit(pressure_limit));
 }
 
 test "pressure reads the some avg10 field" {
