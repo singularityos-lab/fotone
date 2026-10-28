@@ -47,6 +47,7 @@ pub const WebView = extern struct {
     passwords: c.gboolean,
     surface: ?*c.GdkSurface,
     rescale: c.gulong,
+    restate: c.gulong,
     nudge: c.guint,
     frozen: c.gboolean,
     asking: c.gboolean,
@@ -281,6 +282,15 @@ fn scaleChanged(_: ?*c.GObject, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c
     if (w.toplevel) |t| c.fotone_toplevel_configure(t, c.gtk_widget_get_width(wd), c.gtk_widget_get_height(wd), scaleOf(wd));
 }
 
+fn stateChanged(_: ?*c.GObject, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c) void {
+    const w = of(data);
+    const sf = w.surface orelse return;
+    const v = w.view orelse return;
+    if (!isA(sf, c.gdk_toplevel_get_type())) return;
+    const suspended = (c.gdk_toplevel_get_state(@ptrCast(sf)) & c.GDK_TOPLEVEL_STATE_SUSPENDED) != 0;
+    c.wpe_view_set_visible(v, @intFromBool(!suspended));
+}
+
 fn sleep(w: *WebView) void {
     const web = w.web orelse return;
     if (w.state != null or w.texture == null) return;
@@ -448,7 +458,9 @@ fn map(wd: [*c]c.GtkWidget) callconv(.c) void {
     if (w.clock) |k| w.paint = c.g_signal_connect_data(k, "after-paint", @ptrCast(&afterPaint), w, null, 0);
     if (c.gtk_widget_get_native(wd)) |n| w.surface = c.gtk_native_get_surface(n);
     if (w.surface) |sf| w.rescale = c.g_signal_connect_data(sf, "notify::scale", @ptrCast(&scaleChanged), w, null, 0);
+    if (w.surface) |sf| w.restate = c.g_signal_connect_data(sf, "notify::state", @ptrCast(&stateChanged), w, null, 0);
     if (w.view) |v| c.wpe_view_set_toplevel(v, w.toplevel);
+    stateChanged(null, null, w);
 }
 
 fn unmap(wd: [*c]c.GtkWidget) callconv(.c) void {
@@ -458,8 +470,10 @@ fn unmap(wd: [*c]c.GtkWidget) callconv(.c) void {
     w.clock = null;
     w.paint = 0;
     if (w.surface) |sf| c.g_signal_handler_disconnect(sf, w.rescale);
+    if (w.surface) |sf| c.g_signal_handler_disconnect(sf, w.restate);
     w.surface = null;
     w.rescale = 0;
+    w.restate = 0;
     w.hidden_at = c.g_get_monotonic_time();
     parent_class.?.unmap.?(wd);
 }
