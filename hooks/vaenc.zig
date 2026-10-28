@@ -1,21 +1,21 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const Status = c_int;
-const Display = ?*anyopaque;
-const Id = u32;
-const invalid: Id = 0xffffffff;
+pub const Status = c_int;
+pub const Display = ?*anyopaque;
+pub const Id = u32;
+pub const invalid: Id = 0xffffffff;
 
 const profile_constrained_baseline: c_int = 13;
 const entry_enc_slice: c_int = 6;
 const entry_enc_slice_lp: c_int = 8;
 const attrib_rt_format: c_int = 0;
 const attrib_rate_control: c_int = 5;
-const rt_yuv420: u32 = 0x1;
+pub const rt_yuv420: u32 = 0x1;
 const rc_cbr: u32 = 0x2;
 const rc_vbr: u32 = 0x4;
-const progressive: c_int = 0x1;
-const fourcc_nv12: u32 = 0x3231564E;
+pub const progressive: c_int = 0x1;
+pub const fourcc_nv12: u32 = 0x3231564E;
 
 const buf_coded: c_int = 21;
 const buf_seq: c_int = 22;
@@ -25,8 +25,8 @@ const buf_misc: c_int = 27;
 const misc_frame_rate: u32 = 0;
 const misc_rate_control: u32 = 1;
 
-const pic_invalid: u32 = 0x1;
-const pic_short_term: u32 = 0x8;
+pub const pic_invalid: u32 = 0x1;
+pub const pic_short_term: u32 = 0x8;
 
 pub const Picture = extern struct {
     picture_id: Id = invalid,
@@ -147,7 +147,7 @@ const FrameRate = extern struct {
     reserved: [4]u32 = .{ 0, 0, 0, 0 },
 };
 
-const ImageFormat = extern struct { fourcc: u32, byte_order: u32, bits_per_pixel: u32, depth: u32, masks: [4]u32, reserved: [4]u32 };
+pub const ImageFormat = extern struct { fourcc: u32, byte_order: u32, bits_per_pixel: u32, depth: u32, masks: [4]u32, reserved: [4]u32 };
 
 pub const Image = extern struct {
     image_id: Id,
@@ -175,9 +175,9 @@ pub const Segment = extern struct {
     va_reserved: [4]u32,
 };
 
-const Attrib = extern struct { kind: c_int, value: u32 };
+pub const Attrib = extern struct { kind: c_int, value: u32 };
 
-const Api = struct {
+pub const Api = struct {
     getDisplayDRM: *const fn (c_int) callconv(.c) Display,
     initialize: *const fn (Display, *c_int, *c_int) callconv(.c) Status,
     terminate: *const fn (Display) callconv(.c) Status,
@@ -205,11 +205,11 @@ const Api = struct {
 var api: ?Api = null;
 var loaded = false;
 
-fn sym(comptime T: type, lib: *anyopaque, name: [:0]const u8) ?T {
+pub fn sym(comptime T: type, lib: *anyopaque, name: [:0]const u8) ?T {
     return @ptrCast(std.c.dlsym(lib, name) orelse return null);
 }
 
-fn load() ?Api {
+pub fn load() ?Api {
     if (loaded) return api;
     loaded = true;
     const va = std.c.dlopen("libva.so.2", .{ .LAZY = true }) orelse return null;
@@ -330,7 +330,7 @@ pub fn slice(e: *const Encoder, idr: bool, pic: *const PictureParams) Slice {
     return s;
 }
 
-fn check(status: Status) !void {
+pub fn check(status: Status) !void {
     if (status != 0) return error.Va;
 }
 
