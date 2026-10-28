@@ -1,0 +1,71 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2254,17 +2254,6 @@
+         Source/third_party/boringssl/src/crypto/cpu_arm_linux.cc
+         Source/third_party/boringssl/src/crypto/poly1305/poly1305_arm.cc
+ 
+-        Source/third_party/libyuv/source/compare.cc
+-        Source/third_party/libyuv/source/compare_neon.cc
+-        Source/third_party/libyuv/source/compare_neon64.cc
+-        Source/third_party/libyuv/source/rotate_neon.cc
+-        Source/third_party/libyuv/source/rotate_neon64.cc
+-        Source/third_party/libyuv/source/row_neon.cc
+-        Source/third_party/libyuv/source/row_neon64.cc
+-        Source/third_party/libyuv/source/scale.cc
+-        Source/third_party/libyuv/source/scale_neon.cc
+-        Source/third_party/libyuv/source/scale_neon64.cc
+-
+         Source/webrtc/modules/audio_device/linux/alsasymboltable_linux.cc
+         Source/webrtc/modules/audio_device/linux/audio_device_alsa_linux.cc
+         Source/webrtc/modules/audio_device/linux/audio_mixer_manager_alsa_linux.cc
+@@ -2443,6 +2432,10 @@
+         target_link_libraries(webrtc aom dav1d)
+     endif ()
+ else ()
++    list(APPEND webrtc_INCLUDE_DIRECTORIES PRIVATE
++        Source/third_party/libvpx/source/libvpx
++    )
++    target_link_libraries(webrtc vpx yuv libsrtp)
+     target_link_libraries(webrtc ${LIBEVENT_LIBRARY})
+     target_link_libraries(webrtc ${LIBOPUS_LIBRARY})
+ endif ()
+@@ -2732,6 +2725,9 @@
+         "-DHAVE_LRINT HAVE_LRINTF"
+     )
+ 
++endif ()
++
++if (TRUE)
+     add_library(yuv STATIC
+         Source/third_party/libvpx/source/libvpx/third_party/libyuv/source/scale.cc
+         Source/third_party/libvpx/source/libvpx/third_party/libyuv/source/compare.cc
+@@ -2763,6 +2759,9 @@
+         Source/third_party/libvpx/source/libvpx/third_party/libyuv/include
+         Source/third_party/libyuv/include
+     )
++endif ()
++
++if (APPLE)
+ 
+     add_executable(yasm
+         Source/third_party/yasm/x86cpu.c
+@@ -3320,8 +3319,17 @@
+ 
+ if (WTF_CPU_X86_64)
+     add_library(vpx OBJECT ${vpx_SOURCES} ${vpx_ASSEMBLY_SOURCES})
+-    target_compile_options(vpx PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
+-    target_compile_options(vpx PRIVATE $<$<COMPILE_LANGUAGE:C>:-mavx2>)
++    foreach (source IN LISTS vpx_SOURCES)
++        if (source MATCHES "_avx2\\.c$")
++            set_source_files_properties(${source} PROPERTIES COMPILE_OPTIONS "-mavx2")
++        elseif (source MATCHES "_avx\\.c$")
++            set_source_files_properties(${source} PROPERTIES COMPILE_OPTIONS "-mavx")
++        elseif (source MATCHES "_sse4\\.c$")
++            set_source_files_properties(${source} PROPERTIES COMPILE_OPTIONS "-msse4.1")
++        elseif (source MATCHES "_ssse3\\.c$")
++            set_source_files_properties(${source} PROPERTIES COMPILE_OPTIONS "-mssse3")
++        endif ()
++    endforeach ()
+ elseif (WTF_CPU_ARM64)
+     add_library(vpx OBJECT ${vpx_SOURCES})
+     target_compile_options(vpx PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-march=armv8.2-a+dotprod>)

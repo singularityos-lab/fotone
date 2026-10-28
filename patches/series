@@ -16,3 +16,5 @@ fotone 0015-web-view-suspend.patch
 fotone 0016-release-suspended-page-memory.patch
 fotone 0017-http3-network-loads.patch
 fotone 0018-dns-cache.patch
+fotone 0019-libwebrtc-software-video-fallback.patch
+upstream 0020-mdns-local-names-without-avahi.patch

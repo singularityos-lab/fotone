@@ -9,7 +9,8 @@ engine needs live as patches in `patches/`.
 
 ## Components
 
-- `upstream/`: the pinned WPE WebKit release and its checksum.
+- `upstream/`: the pinned WPE WebKit release, the libwebrtc tree of the same WebKit commit, and the
+  ngtcp2, nghttp3, libevent and Opus releases built into the engine, each with its checksum or commit.
 - `patches/`: changes applied on top of upstream, one file per change. `patches/series` marks each one
   `upstream` (a generic fix to send to WebKit) or `fotone` (stays in the fork); `zig build upstream`
   copies the first kind to `zig-out/upstream-patches`.
@@ -50,7 +51,7 @@ and builds WebKit with the Sinty options.
 
 ## Build
 
-Zig 0.16, CMake, Ninja and the WPE WebKit build dependencies.
+Zig 0.16, CMake, Ninja, NASM, the ALSA headers and the WPE WebKit build dependencies.
 
     zig build engine
     zig build

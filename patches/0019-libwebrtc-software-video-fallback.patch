@@ -1,0 +1,70 @@
+--- a/Source/WebCore/platform/mediastream/libwebrtc/gstreamer/LibWebRTCProviderGStreamer.cpp
++++ b/Source/WebCore/platform/mediastream/libwebrtc/gstreamer/LibWebRTCProviderGStreamer.cpp
+@@ -28,6 +28,11 @@
+ 
+ #if USE(LIBWEBRTC) && USE(GSTREAMER)
+ 
++#include "GStreamerVideoDecoderFactory.h"
++#include "GStreamerVideoEncoderFactory.h"
++#include <webrtc/api/video_codecs/builtin_video_decoder_factory.h>
++#include <webrtc/api/video_codecs/builtin_video_encoder_factory.h>
++
+ namespace WebCore {
+ 
+ UniqueRef<WebRTCProvider> WebRTCProvider::create()
+@@ -40,14 +45,53 @@
+     return true;
+ }
+ 
++template<typename Factory, typename Codec>
++class FallbackVideoFactory final : public Factory {
++    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(FallbackVideoFactory);
++public:
++    FallbackVideoFactory(std::unique_ptr<Factory>&& preferred, std::unique_ptr<Factory>&& fallback)
++        : m_preferred(WTF::move(preferred))
++        , m_fallback(WTF::move(fallback))
++    {
++    }
++
++    std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const final
++    {
++        auto formats = m_preferred->GetSupportedFormats();
++        for (auto& format : m_fallback->GetSupportedFormats()) {
++            if (!contains(formats, format))
++                formats.push_back(format);
++        }
++        return formats;
++    }
++
++    std::unique_ptr<Codec> Create(const webrtc::Environment& environment, const webrtc::SdpVideoFormat& format) final
++    {
++        if (contains(m_preferred->GetSupportedFormats(), format)) {
++            if (auto codec = m_preferred->Create(environment, format))
++                return codec;
++        }
++        return m_fallback->Create(environment, format);
++    }
++
++private:
++    static bool contains(const std::vector<webrtc::SdpVideoFormat>& formats, const webrtc::SdpVideoFormat& format)
++    {
++        return std::ranges::any_of(formats, [&](auto& candidate) { return candidate.IsSameCodec(format); });
++    }
++
++    std::unique_ptr<Factory> m_preferred;
++    std::unique_ptr<Factory> m_fallback;
++};
++
+ std::unique_ptr<webrtc::VideoDecoderFactory> LibWebRTCProviderGStreamer::createDecoderFactory()
+ {
+-    return makeUnique<GStreamerVideoDecoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2());
++    return makeUnique<FallbackVideoFactory<webrtc::VideoDecoderFactory, webrtc::VideoDecoder>>(makeUnique<GStreamerVideoDecoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2()), webrtc::CreateBuiltinVideoDecoderFactory());
+ }
+ 
+ std::unique_ptr<webrtc::VideoEncoderFactory> LibWebRTCProviderGStreamer::createEncoderFactory()
+ {
+-    return makeUnique<GStreamerVideoEncoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2());
++    return makeUnique<FallbackVideoFactory<webrtc::VideoEncoderFactory, webrtc::VideoEncoder>>(makeUnique<GStreamerVideoEncoderFactory>(isSupportingVP9Profile0(), isSupportingVP9Profile2()), webrtc::CreateBuiltinVideoEncoderFactory());
+ }
+ 
+ } // namespace WebCore

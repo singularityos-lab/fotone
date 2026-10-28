@@ -6,6 +6,9 @@ const pin = @embedFile("upstream/wpewebkit");
 const dawn_pin = @embedFile("upstream/dawn");
 const ngtcp2_pin = @embedFile("upstream/ngtcp2");
 const nghttp3_pin = @embedFile("upstream/nghttp3");
+const libwebrtc_pin = @embedFile("upstream/libwebrtc");
+const libevent_pin = @embedFile("upstream/libevent");
+const opus_pin = @embedFile("upstream/opus");
 
 const engine_flags = [_][]const u8{
     "-DPORT=WPE",
@@ -28,7 +31,7 @@ const engine_flags = [_][]const u8{
     "-DUSE_LIBBACKTRACE=OFF",
     "-DUSE_SYSPROF_CAPTURE=OFF",
     "-DENABLE_WEB_RTC=ON",
-    "-DUSE_GSTREAMER_WEBRTC=ON",
+    "-DUSE_GSTREAMER_WEBRTC=OFF",
     "-DUSE_LIBRICE=OFF",
     "-DENABLE_ENCRYPTED_MEDIA=ON",
     "-DENABLE_THUNDER=ON",
@@ -176,6 +179,25 @@ pub fn build(b: *std.Build) void {
         \\build "$1" "ngtcp2-$6" "$7" "$8" --with-gnutls --without-openssl --without-libnghttp3
     , "quic", quic, b.fmt("{d}", .{jobs}), comptime pinOf(nghttp3_pin, "version"), comptime pinOf(nghttp3_pin, "url"), comptime pinOf(nghttp3_pin, "sha256"), comptime pinOf(ngtcp2_pin, "version"), comptime pinOf(ngtcp2_pin, "url"), comptime pinOf(ngtcp2_pin, "sha256") });
     const quic_lib = b.pathJoin(&.{ quic, "lib" });
+
+    const rtc = b.pathJoin(&.{ out, "rtc" });
+    const rtc_build = b.addSystemCommand(&.{ "sh", "-ec",
+        \\[ -f "$1/lib/libopus.a" ] && exit 0
+        \\mkdir -p "$1/src"
+        \\build() {
+        \\  t="$1/src/$2.tar.gz"
+        \\  [ -f "$t" ] || curl -fsSL -o "$t" "$3"
+        \\  echo "$4  $t" | sha256sum -c -
+        \\  tar --no-same-owner -C "$1/src" -xzf "$t"
+        \\  cd "$1/src/$2"
+        \\  shift 4
+        \\  CFLAGS="-O2 -fPIC" ./configure --prefix="$P" --disable-shared --enable-static --with-pic "$@"
+        \\  make -j"$J" && make install
+        \\}
+        \\P="$1" J="$2"
+        \\build "$1" "libevent-$3" "$4" "$5" --disable-openssl --disable-samples --disable-libevent-regress
+        \\build "$1" "opus-$6" "$7" "$8" --disable-doc --disable-extra-programs
+    , "rtc", rtc, b.fmt("{d}", .{jobs}), comptime pinOf(libevent_pin, "version"), comptime pinOf(libevent_pin, "url"), comptime pinOf(libevent_pin, "sha256"), comptime pinOf(opus_pin, "version"), comptime pinOf(opus_pin, "url"), comptime pinOf(opus_pin, "sha256") });
     const net_libs = b.fmt("{s}/{s};{s}/{s};{s}/{s};-lgnutls", .{ quic_lib, net_archives[0], quic_lib, net_archives[1], quic_lib, net_archives[2] });
 
     const lower = b.addRunArtifact(b.addExecutable(.{
@@ -243,6 +265,27 @@ pub fn build(b: *std.Build) void {
     configure.addPrefixedFileArg("-DFOTONE_HOOKS=", hooks.getEmittedBin());
     configure.addArg(b.fmt("-DFOTONE_NET_LIBS={s}", .{net_libs}));
     configure.step.dependOn(&fetch.step);
+    configure.addArgs(&.{
+        b.fmt("-DLIBEVENT_INCLUDE_DIR={s}/include", .{rtc}),
+        b.fmt("-DLIBEVENT_LIBRARY={s}/lib/libevent.a", .{rtc}),
+        b.fmt("-DLIBOPUS_INCLUDE_DIR={s}/include/opus", .{rtc}),
+        b.fmt("-DLIBOPUS_LIBRARY={s}/lib/libopus.a", .{rtc}),
+    });
+    const webrtc_fetch = b.addSystemCommand(&.{ "sh", "-ec",
+        \\[ -f "$1/$4/CMakeLists.txt" ] && exit 0
+        \\c="$1.libwebrtc"
+        \\rm -rf "$c"
+        \\git init -q "$c"
+        \\git -C "$c" sparse-checkout set --no-cone "/$4/"
+        \\git -C "$c" fetch -q --filter=blob:none --depth 1 "$2" "$3"
+        \\git -C "$c" checkout -q FETCH_HEAD
+        \\cp -a "$c/$4" "$1/$4"
+        \\rm -rf "$c"
+        \\for p in "$5"/libwebrtc-*.patch; do patch -d "$1/$4" -p1 -N < "$p"; done
+    , "webrtc-fetch", src, comptime pinOf(libwebrtc_pin, "url"), comptime pinOf(libwebrtc_pin, "commit"), comptime pinOf(libwebrtc_pin, "path"), b.pathFromRoot("patches") });
+    webrtc_fetch.step.dependOn(&fetch.step);
+    configure.step.dependOn(&webrtc_fetch.step);
+    configure.step.dependOn(&rtc_build.step);
 
     const compile = b.addSystemCommand(&.{ "ninja", "-C", out, b.fmt("-j{d}", .{jobs}) });
     compile.step.dependOn(&configure.step);

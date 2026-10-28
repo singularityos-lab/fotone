@@ -1,0 +1,24 @@
+--- a/Source/WebKit/NetworkProcess/glib/NetworkMDNSRegisterGLib.cpp
++++ b/Source/WebKit/NetworkProcess/glib/NetworkMDNSRegisterGLib.cpp
+@@ -78,16 +78,16 @@
+         return;
+     }
+ 
+-    if (!m_dbusProxy) {
+-        completionHandler(name, WebCore::MDNSRegisterError::Internal);
+-        return;
+-    }
+-
+     m_registeredNames.add(name);
+     m_perDocumentRegisteredNames.ensure(documentIdentifier, [] {
+         return Vector<String>();
+     }).iterator->value.append(name);
+ 
++    if (!m_dbusProxy) {
++        completionHandler(name, WebCore::MDNSRegisterError::Internal);
++        return;
++    }
++
+     Ref connection = m_connection.get();
+     auto request = makeUnique<PendingRegistrationRequest>(connection.get(), WTF::move(name), ipAddress, sessionID(), WTF::move(completionHandler));
+ 
