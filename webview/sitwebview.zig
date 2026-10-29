@@ -391,7 +391,46 @@ fn check(_: c.gpointer) callconv(.c) c.gboolean {
         if (oldest.state == null) break;
     }
     limitSites(list, memory.siteLimit(p));
+    if (memory.webMemory() > memory.memoryBudget()) {
+        if (heaviestSiteOldest(list)) |w| {
+            thaw(w);
+            sleep(w);
+        }
+    }
     return 1;
+}
+
+fn sleepable(w: *WebView) bool {
+    return w.hidden_at > 0 and w.state == null and w.texture != null and !busy(w);
+}
+
+fn heaviestSiteOldest(list: *c.GPtrArray) ?*WebView {
+    var best: ?*WebView = null;
+    var best_count: usize = 0;
+    var i: c.guint = 0;
+    while (i < list.*.len) : (i += 1) {
+        const candidate = of(list.*.pdata[i]);
+        if (!sleepable(candidate)) continue;
+        const site = siteOf(candidate) orelse continue;
+        defer c.g_free(site);
+        var count: usize = 0;
+        var oldest = candidate;
+        var j: c.guint = 0;
+        while (j < list.*.len) : (j += 1) {
+            const w = of(list.*.pdata[j]);
+            if (!sleepable(w)) continue;
+            const other = siteOf(w) orelse continue;
+            defer c.g_free(other);
+            if (c.g_strcmp0(site, other) != 0) continue;
+            count += 1;
+            if (w.hidden_at < oldest.hidden_at) oldest = w;
+        }
+        if (count > best_count or count == best_count and best != null and oldest.hidden_at < best.?.hidden_at) {
+            best = oldest;
+            best_count = count;
+        }
+    }
+    return best;
 }
 
 fn siteOf(w: *WebView) ?[*:0]u8 {
