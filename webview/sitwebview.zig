@@ -602,16 +602,17 @@ pub fn swipeResult(dx: f64) Swipe {
 
 fn gesture(w: *WebView, ev: ?*c.GdkEvent) bool {
     const web = w.web orelse return false;
-    const phase = c.gdk_touchpad_event_get_gesture_phase(ev);
     switch (c.gdk_event_get_event_type(ev)) {
         c.GDK_TOUCHPAD_PINCH => {
             if (c.gdk_touchpad_event_get_n_fingers(ev) != 2) return false;
+            const phase = c.gdk_touchpad_event_get_gesture_phase(ev);
             if (phase == c.GDK_TOUCHPAD_GESTURE_PHASE_BEGIN) w.pinch_base = c.webkit_web_view_get_zoom_level(web);
             if (phase == c.GDK_TOUCHPAD_GESTURE_PHASE_UPDATE and w.pinch_base > 0) c.webkit_web_view_set_zoom_level(web, clampZoom(w.pinch_base * c.gdk_touchpad_event_get_pinch_scale(ev)));
             return true;
         },
         c.GDK_TOUCHPAD_SWIPE => {
             if (c.gdk_touchpad_event_get_n_fingers(ev) != 3) return false;
+            const phase = c.gdk_touchpad_event_get_gesture_phase(ev);
             var dx: f64 = 0;
             var dy: f64 = 0;
             c.gdk_touchpad_event_get_deltas(ev, &dx, &dy);
