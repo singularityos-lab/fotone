@@ -117,7 +117,10 @@ pub const Conn = struct {
     }
 
     pub fn close(self: *Conn) void {
-        for (self.waiting.items) |r| r.sink.done(r.sink.ctx, false);
+        for (self.waiting.items) |r| if (!r.finished) {
+            r.finished = true;
+            r.sink.done(r.sink.ctx, false);
+        };
         self.waiting.deinit(self.gpa);
         if (self.h3) |h| c.nghttp3_conn_del(h);
         if (self.conn) |q| c.ngtcp2_conn_del(q);
@@ -358,7 +361,10 @@ pub const Conn = struct {
     }
 
     pub fn submit(self: *Conn, r: *Request) void {
-        self.waiting.append(self.gpa, r) catch return r.sink.done(r.sink.ctx, false);
+        self.waiting.append(self.gpa, r) catch {
+            r.finished = true;
+            return r.sink.done(r.sink.ctx, false);
+        };
         self.active += 1;
         if (self.h3 != null) self.submitWaiting();
     }

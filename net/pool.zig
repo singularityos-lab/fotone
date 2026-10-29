@@ -162,7 +162,6 @@ const Task = struct {
         const self = of(ctx);
         if (ok) self.respond();
         self.post(.done, &.{}, ok and self.responded);
-        self.unref();
     }
 };
 
@@ -189,22 +188,28 @@ const Host = struct {
             self.live.append(gpa, t) catch {
                 t.req.finished = true;
                 Task.onDone(t, false);
+                t.unref();
                 continue;
             };
             if (conn) |q| q.submit(&t.req);
         }
         self.incoming.clearRetainingCapacity();
         for (self.cancels.items) |t| {
-            const pending = !t.req.finished;
             if (conn) |q| q.cancel(&t.req) else t.req.finished = true;
-            if (std.mem.indexOfScalar(*Task, self.live.items, t)) |i| _ = self.live.swapRemove(i);
-            if (pending) t.unref();
+            if (std.mem.indexOfScalar(*Task, self.live.items, t)) |i| {
+                _ = self.live.swapRemove(i);
+                t.unref();
+            }
             t.unref();
         }
         self.cancels.clearRetainingCapacity();
         var i: usize = 0;
         while (i < self.live.items.len) {
-            if (self.live.items[i].req.finished) _ = self.live.swapRemove(i) else i += 1;
+            const t = self.live.items[i];
+            if (t.req.finished) {
+                _ = self.live.swapRemove(i);
+                t.unref();
+            } else i += 1;
         }
     }
 
@@ -212,10 +217,13 @@ const Host = struct {
         self.mutex.lock();
         const live = self.live.toOwnedSlice(gpa) catch &.{};
         self.mutex.unlock();
-        for (live) |t| if (!t.req.finished) {
-            t.req.finished = true;
-            Task.onDone(t, false);
-        };
+        for (live) |t| {
+            if (!t.req.finished) {
+                t.req.finished = true;
+                Task.onDone(t, false);
+            }
+            t.unref();
+        }
         gpa.free(live);
     }
 
@@ -270,12 +278,12 @@ const Host = struct {
             }
         }
         conn.failAll();
+        conn.close();
         self.failLive();
         while (!self.retire()) {
             self.take(null);
             self.failLive();
         }
-        conn.close();
         self.destroy();
     }
 
@@ -403,6 +411,39 @@ test "alt-svc routes expire, clear and survive lookups" {
     try std.testing.expectEqual(@as(?u16, null), route("example.com", 443));
     learn("example.org", 443, "h3=\":443\"; ma=0");
     try std.testing.expectEqual(@as(?u16, null), route("example.org", 443));
+}
+
+test "a finished task stays owned by its host until the host lets it go" {
+    const Probe = struct {
+        var done: u32 = 0;
+        fn response(_: ?*anyopaque, _: [*]const u8, _: usize) callconv(.c) void {}
+        fn data(_: ?*anyopaque, _: [*]const u8, _: usize) callconv(.c) void {}
+        fn finished(ctx: ?*anyopaque, _: c_int) callconv(.c) void {
+            done += 1;
+            fotone_h3_release(ctx);
+        }
+    };
+    const host = try gpa.create(Host);
+    host.* = .{ .name = try gpa.dupeZ(u8, "example.com"), .port = 443, .alt_port = 443, .wake = c.eventfd(0, c.EFD_CLOEXEC | c.EFD_NONBLOCK) };
+    defer host.destroy();
+    const task = try gpa.create(Task);
+    task.* = .{
+        .main = null,
+        .sink = .{ .response = Probe.response, .data = Probe.data, .done = Probe.finished },
+        .ctx = task,
+        .owned = try gpa.alloc(u8, 0),
+        .req = .{ .method = "GET", .path = "/", .headers = "", .sink = .{ .ctx = task, .header = Task.onHeader, .data = Task.onData, .done = Task.onDone } },
+    };
+    try host.incoming.append(gpa, task);
+    host.take(null);
+    task.req.finished = true;
+    Task.onDone(task, false);
+    while (c.g_main_context_iteration(null, 0) != 0) {}
+    try std.testing.expectEqual(@as(u32, 1), Probe.done);
+    try std.testing.expectEqual(@as(u32, 1), task.refs.load(.acquire));
+    host.failLive();
+    while (c.g_main_context_iteration(null, 0) != 0) {}
+    try std.testing.expectEqual(@as(u32, 1), Probe.done);
 }
 
 comptime {
