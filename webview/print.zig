@@ -33,7 +33,6 @@ fn surfaceFrom(img: *c.WebKitImage) ?*c.cairo_surface_t {
     const w = c.webkit_image_get_width(img);
     const h = c.webkit_image_get_height(img);
     const bytes = c.webkit_image_as_bytes(img) orelse return null;
-    defer c.g_bytes_unref(bytes);
     const s = c.cairo_image_surface_create(c.CAIRO_FORMAT_ARGB32, w, h) orelse return null;
     c.cairo_surface_flush(s);
     const src: [*]const u8 = @ptrCast(c.g_bytes_get_data(bytes, null));

@@ -571,7 +571,7 @@ pub fn imageSurface(image: ?*c.WebKitImage) ?*c.cairo_surface_t {
     var size: usize = 0;
     const data = c.g_bytes_get_data(bytes, &size);
     const s = c.cairo_image_surface_create_for_data(@ptrCast(@constCast(data)), c.CAIRO_FORMAT_ARGB32, c.webkit_image_get_width(img), c.webkit_image_get_height(img), @intCast(c.webkit_image_get_stride(img)));
-    _ = c.cairo_surface_set_user_data(s, &surface_key, bytes, releaseBytes);
+    _ = c.cairo_surface_set_user_data(s, &surface_key, c.g_bytes_ref(bytes), releaseBytes);
     return s;
 }
 

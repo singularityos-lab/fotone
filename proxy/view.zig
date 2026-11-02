@@ -298,7 +298,6 @@ pub fn rgbaToColor(rgba: c.GdkRGBA) c.WebKitColor {
 pub fn imageTexture(image: ?*c.WebKitImage) ?*c.GdkTexture {
     const img = image orelse return null;
     const bytes = c.webkit_image_as_bytes(img) orelse return null;
-    defer c.g_bytes_unref(bytes);
     return c.gdk_memory_texture_new(c.webkit_image_get_width(img), c.webkit_image_get_height(img), c.GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, bytes, c.webkit_image_get_stride(img));
 }
 
