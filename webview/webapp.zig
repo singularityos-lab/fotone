@@ -71,7 +71,11 @@ pub fn session(id: [*:0]const u8) ?*c.WebKitNetworkSession {
     defer c.g_free(data);
     const cache = c.g_build_filename(c.g_get_user_cache_dir(), "fotone", "apps", id, @as([*c]const u8, null));
     defer c.g_free(cache);
-    return c.webkit_network_session_new(data, cache);
+    const net = c.webkit_network_session_new(data, cache) orelse return null;
+    const cookies = c.g_build_filename(data, "cookies.sqlite", @as([*c]const u8, null));
+    defer c.g_free(cookies);
+    c.webkit_cookie_manager_set_persistent_storage(c.webkit_network_session_get_cookie_manager(net), cookies, c.WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
+    return net;
 }
 
 pub fn pageIcon(web: *c.WebKitWebView) ?*c.GdkTexture {
