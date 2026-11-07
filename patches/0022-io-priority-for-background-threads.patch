@@ -1,0 +1,47 @@
+--- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
++++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+@@ -319,23 +319,29 @@
+     int niceLevel;
+     // DVFS floor, see s_utilizationScale
+     uint32_t minUtil;
++    int ioPriority;
+ };
+ 
+ // The kernel's utilization scale, on which 1024 means a fully utilized CPU.
+ static constexpr uint32_t s_utilizationScale = 1024;
+ 
++static constexpr int s_ioPriorityWhoProcess = 1;
++static constexpr int s_ioPriorityClassShift = 13;
++static constexpr int s_ioPriorityBestEffortLowest = 2 << s_ioPriorityClassShift | 7;
++static constexpr int s_ioPriorityIdle = 3 << s_ioPriorityClassShift;
++
+ static SchedulingAttributes schedulingAttributesForQOS(Thread::QOS qos)
+ {
+     switch (qos) {
+     case Thread::QOS::UserInteractive:
+     case Thread::QOS::UserInitiated:
+-        return { SCHED_OTHER, 0, s_utilizationScale };
++        return { SCHED_OTHER, 0, s_utilizationScale, 0 };
+     case Thread::QOS::Default:
+-        return { SCHED_OTHER, 0, s_utilizationScale * 20 / 100 };
++        return { SCHED_OTHER, 0, s_utilizationScale * 20 / 100, 0 };
+     case Thread::QOS::Utility:
+-        return { SCHED_BATCH, 10, 0 };
++        return { SCHED_BATCH, 10, 0, s_ioPriorityBestEffortLowest };
+     case Thread::QOS::Background:
+-        return { SCHED_IDLE, 19, 0 };
++        return { SCHED_IDLE, 19, 0, s_ioPriorityIdle };
+     }
+     RELEASE_ASSERT_NOT_REACHED();
+ }
+@@ -403,6 +409,10 @@
+ 
+     const auto attributes = schedulingAttributesForQOS(state == SchedulingState::Demoted ? QOS::Default : m_qos);
+ 
++#if defined(SYS_ioprio_set)
++    syscall(SYS_ioprio_set, s_ioPriorityWhoProcess, m_id, attributes.ioPriority);
++#endif
++
+ #if HAVE(SCHED_SETATTR)
+     static std::atomic<bool> utilizationClampSupported { true };
+ 
