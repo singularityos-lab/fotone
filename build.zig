@@ -433,30 +433,34 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(jsc);
 
-    const proxy3_mod = proxy3Module(b, target, optimize, out, engine_mod, platform);
-    const proxy3 = b.addLibrary(.{
-        .name = "webkit2gtk-4.1",
-        .linkage = .dynamic,
-        .version = .{ .major = 0, .minor = 0, .patch = 0 },
-        .root_module = proxy3_mod,
-        .use_llvm = true,
-    });
-    proxy3.setVersionScript(b.path("proxy/symbols3.map"));
-    b.installArtifact(proxy3);
+    const gtk3 = b.option(bool, "gtk3", "build the WebKit2GTK 4.1 libraries and the GTK 3 compat tool") orelse true;
+    if (gtk3) {
+        const proxy3_mod = proxy3Module(b, target, optimize, out, engine_mod, platform);
+        const proxy3 = b.addLibrary(.{
+            .name = "webkit2gtk-4.1",
+            .linkage = .dynamic,
+            .version = .{ .major = 0, .minor = 0, .patch = 0 },
+            .root_module = proxy3_mod,
+            .use_llvm = true,
+        });
+        proxy3.setVersionScript(b.path("proxy/symbols3.map"));
+        b.installArtifact(proxy3);
 
-    const jsc3 = b.addLibrary(.{
-        .name = "javascriptcoregtk-4.1",
-        .linkage = .dynamic,
-        .version = .{ .major = 0, .minor = 0, .patch = 0 },
-        .root_module = jsc_mod,
-        .use_llvm = true,
-    });
-    b.installArtifact(jsc3);
+        const jsc3 = b.addLibrary(.{
+            .name = "javascriptcoregtk-4.1",
+            .linkage = .dynamic,
+            .version = .{ .major = 0, .minor = 0, .patch = 0 },
+            .root_module = jsc_mod,
+            .use_llvm = true,
+        });
+        b.installArtifact(jsc3);
+    }
 
     for ([_]struct { name: []const u8, gtk: []const u8, gtk3: bool }{
         .{ .name = "fotone-compat", .gtk = "gtk4", .gtk3 = false },
         .{ .name = "fotone-compat3", .gtk = "gtk+-3.0", .gtk3 = true },
     }) |v| {
+        if (v.gtk3 and !gtk3) continue;
         const compat_mod = b.createModule(.{ .root_source_file = b.path("compat/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
         compat_mod.addIncludePath(b.path("compat"));
         compat_mod.linkSystemLibrary(v.gtk, .{});
@@ -487,10 +491,9 @@ pub fn build(b: *std.Build) void {
     pt_mod.linkLibrary(webview);
     pt_mod.addOptions("options", flavor(b, false));
     const pt = b.addTest(.{ .root_module = pt_mod, .use_llvm = true });
-    const pt3 = b.addTest(.{ .root_module = proxy3Module(b, target, optimize, out, engine_mod, platform), .use_llvm = true });
     const test_step = b.step("test", "run tests");
     test_step.dependOn(&b.addRunArtifact(pt).step);
-    test_step.dependOn(&b.addRunArtifact(pt3).step);
+    if (gtk3) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = proxy3Module(b, target, optimize, out, engine_mod, platform), .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(t).step);
     test_step.dependOn(&b.addRunArtifact(wt).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
