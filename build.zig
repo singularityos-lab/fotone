@@ -133,6 +133,48 @@ fn proxy3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return mod;
 }
 
+const Cross = struct {
+    arch: []const u8,
+    triple: []const u8,
+    sysroot: ?[]const u8,
+    toolchain: ?[]const u8,
+
+    fn cmake(c: Cross, b: *std.Build, run: *std.Build.Step.Run) void {
+        const root = c.sysroot orelse return;
+        run.addArgs(&.{
+            "-DCMAKE_SYSTEM_NAME=Linux",
+            b.fmt("-DCMAKE_SYSTEM_PROCESSOR={s}", .{c.arch}),
+            b.fmt("-DCMAKE_SYSROOT={s}", .{root}),
+            b.fmt("-DCMAKE_C_COMPILER_TARGET={s}", .{c.triple}),
+            b.fmt("-DCMAKE_CXX_COMPILER_TARGET={s}", .{c.triple}),
+            "-DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER",
+            "-DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY",
+            "-DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY",
+            "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+        });
+        if (c.toolchain) |t| run.addArgs(&.{
+            b.fmt("-DCMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN={s}", .{t}),
+            b.fmt("-DCMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN={s}", .{t}),
+        });
+        c.pkgConfig(b, run);
+    }
+
+    fn autotools(c: Cross, b: *std.Build, run: *std.Build.Step.Run) void {
+        const root = c.sysroot orelse return;
+        const gcc = if (c.toolchain) |t| b.fmt(" --gcc-toolchain={s}", .{t}) else "";
+        run.setEnvironmentVariable("HOST", c.triple);
+        run.setEnvironmentVariable("CC", b.fmt("clang --target={s} --sysroot={s}{s}", .{ c.triple, root, gcc }));
+        run.setEnvironmentVariable("CXX", b.fmt("clang++ --target={s} --sysroot={s}{s}", .{ c.triple, root, gcc }));
+        c.pkgConfig(b, run);
+    }
+
+    fn pkgConfig(c: Cross, b: *std.Build, run: *std.Build.Step.Run) void {
+        const root = c.sysroot orelse return;
+        run.setEnvironmentVariable("PKG_CONFIG_SYSROOT_DIR", root);
+        run.setEnvironmentVariable("PKG_CONFIG_LIBDIR", b.fmt("{s}/usr/lib/pkgconfig:{s}/usr/share/pkgconfig", .{ root, root }));
+    }
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -142,6 +184,13 @@ pub fn build(b: *std.Build) void {
     const jobs = b.option(u32, "jobs", "parallel engine compile jobs") orelse 2;
     const dawn_src = b.option([]const u8, "dawn-src", "Dawn checkout") orelse b.pathFromRoot("upstream/src/dawn");
     const dawn_out = b.option([]const u8, "dawn-build", "Dawn build directory") orelse b.pathFromRoot("upstream/dawn-build");
+    const arch = @tagName(target.result.cpu.arch);
+    const cross: Cross = .{
+        .arch = arch,
+        .triple = b.option([]const u8, "triple", "target triple of the cross engine build") orelse b.fmt("{s}-linux-gnu", .{arch}),
+        .sysroot = b.option([]const u8, "sysroot", "target sysroot, turns the engine build into a cross build"),
+        .toolchain = b.option([]const u8, "gcc-toolchain", "GCC toolchain prefix with the cross linker and runtime"),
+    };
 
     const dawn_fetch = b.addSystemCommand(&.{ "sh", "-ec",
         \\[ -d "$1/.git" ] && exit 0
@@ -152,6 +201,7 @@ pub fn build(b: *std.Build) void {
     , "dawn-fetch", dawn_src, comptime pinOf(dawn_pin, "url"), comptime pinOf(dawn_pin, "commit") });
     const dawn_configure = b.addSystemCommand(&.{ "cmake", "-G", "Ninja", "-S", dawn_src, "-B", dawn_out });
     dawn_configure.addArgs(&dawn_flags);
+    cross.cmake(b, dawn_configure);
     dawn_configure.step.dependOn(&dawn_fetch.step);
     const dawn_compile = b.addSystemCommand(&.{ "ninja", "-C", dawn_out, b.fmt("-j{d}", .{jobs}) });
     dawn_compile.step.dependOn(&dawn_configure.step);
@@ -171,13 +221,14 @@ pub fn build(b: *std.Build) void {
         \\  tar --no-same-owner -C "$1/src" -xf "$t"
         \\  cd "$1/src/$2"
         \\  shift 4
-        \\  CFLAGS="-O2 -fPIC" ./configure --prefix="$P" --enable-lib-only --disable-shared --enable-static --with-pic "$@"
+        \\  CFLAGS="-O2 -fPIC" ./configure ${HOST:+--host=$HOST} --prefix="$P" --enable-lib-only --disable-shared --enable-static --with-pic "$@"
         \\  make -j"$J" && make install
         \\}
         \\P="$1" J="$2"
         \\build "$1" "nghttp3-$3" "$4" "$5"
         \\build "$1" "ngtcp2-$6" "$7" "$8" --with-gnutls --without-openssl --without-libnghttp3
     , "quic", quic, b.fmt("{d}", .{jobs}), comptime pinOf(nghttp3_pin, "version"), comptime pinOf(nghttp3_pin, "url"), comptime pinOf(nghttp3_pin, "sha256"), comptime pinOf(ngtcp2_pin, "version"), comptime pinOf(ngtcp2_pin, "url"), comptime pinOf(ngtcp2_pin, "sha256") });
+    cross.autotools(b, quic_build);
     const quic_lib = b.pathJoin(&.{ quic, "lib" });
 
     const rtc = b.pathJoin(&.{ out, "rtc" });
@@ -191,13 +242,14 @@ pub fn build(b: *std.Build) void {
         \\  tar --no-same-owner -C "$1/src" -xzf "$t"
         \\  cd "$1/src/$2"
         \\  shift 4
-        \\  CFLAGS="-O2 -fPIC" ./configure --prefix="$P" --disable-shared --enable-static --with-pic "$@"
+        \\  CFLAGS="-O2 -fPIC" ./configure ${HOST:+--host=$HOST} --prefix="$P" --disable-shared --enable-static --with-pic "$@"
         \\  make -j"$J" && make install
         \\}
         \\P="$1" J="$2"
         \\build "$1" "libevent-$3" "$4" "$5" --disable-openssl --disable-samples --disable-libevent-regress
         \\build "$1" "opus-$6" "$7" "$8" --disable-doc --disable-extra-programs
     , "rtc", rtc, b.fmt("{d}", .{jobs}), comptime pinOf(libevent_pin, "version"), comptime pinOf(libevent_pin, "url"), comptime pinOf(libevent_pin, "sha256"), comptime pinOf(opus_pin, "version"), comptime pinOf(opus_pin, "url"), comptime pinOf(opus_pin, "sha256") });
+    cross.autotools(b, rtc_build);
     const net_libs = b.fmt("{s}/{s};{s}/{s};{s}/{s};-lgnutls", .{ quic_lib, net_archives[0], quic_lib, net_archives[1], quic_lib, net_archives[2] });
 
     const lower = b.addRunArtifact(b.addExecutable(.{
@@ -260,6 +312,8 @@ pub fn build(b: *std.Build) void {
 
     const configure = b.addSystemCommand(&.{ "cmake", "-G", "Ninja", "-S", src, "-B", out });
     configure.addArgs(&engine_flags);
+    cross.cmake(b, configure);
+    if (b.option([]const []const u8, "engine-cmake", "extra CMake definition for the engine, repeatable")) |extra| configure.addArgs(extra);
     configure.addArg(b.fmt("-DTHUNDER_INCLUDE_DIR={s}", .{b.pathFromRoot("ocdm")}));
     configure.addPrefixedFileArg("-DTHUNDER_LIBRARY=", ocdm.getEmittedBin());
     configure.addPrefixedFileArg("-DFOTONE_HOOKS=", hooks.getEmittedBin());
