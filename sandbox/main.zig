@@ -117,7 +117,11 @@ const RET_K = 0x06;
 const RET_ALLOW: u32 = 0x7fff0000;
 const RET_ERRNO: u32 = 0x00050000;
 const RET_KILL: u32 = 0x80000000;
-const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
+const AUDIT_ARCH: u32 = switch (@import("builtin").cpu.arch) {
+    .x86_64 => 0xc000003e,
+    .aarch64 => 0xc00000b7,
+    else => @compileError("no seccomp arch for this target"),
+};
 const OFF_NR = 0;
 const OFF_ARCH = 4;
 const OFF_ARG0 = 16;
@@ -125,19 +129,54 @@ const OFF_ARG1 = 24;
 
 const Block = struct { nr: linux.SYS, errno: u32 };
 
-const blocked = [_]Block{
-    .{ .nr = .syslog, .errno = 1 },        .{ .nr = .uselib, .errno = 1 },         .{ .nr = .acct, .errno = 1 },
-    .{ .nr = .modify_ldt, .errno = 1 },    .{ .nr = .quotactl, .errno = 1 },       .{ .nr = .add_key, .errno = 1 },
-    .{ .nr = .keyctl, .errno = 1 },        .{ .nr = .request_key, .errno = 1 },    .{ .nr = .move_pages, .errno = 1 },
-    .{ .nr = .mbind, .errno = 1 },         .{ .nr = .get_mempolicy, .errno = 1 },  .{ .nr = .set_mempolicy, .errno = 1 },
-    .{ .nr = .migrate_pages, .errno = 1 }, .{ .nr = .unshare, .errno = 1 },        .{ .nr = .setns, .errno = 1 },
-    .{ .nr = .mount, .errno = 1 },         .{ .nr = .umount2, .errno = 1 },        .{ .nr = .pivot_root, .errno = 1 },
-    .{ .nr = .chroot, .errno = 1 },        .{ .nr = .clone3, .errno = 38 },        .{ .nr = .open_tree, .errno = 38 },
-    .{ .nr = .move_mount, .errno = 38 },   .{ .nr = .fsopen, .errno = 38 },        .{ .nr = .fsconfig, .errno = 38 },
-    .{ .nr = .fsmount, .errno = 38 },      .{ .nr = .fspick, .errno = 38 },        .{ .nr = .mount_setattr, .errno = 38 },
-    .{ .nr = .perf_event_open, .errno = 1 }, .{ .nr = .personality, .errno = 1 },  .{ .nr = .ptrace, .errno = 1 },
-    .{ .nr = .kexec_load, .errno = 1 },    .{ .nr = .kexec_file_load, .errno = 1 }, .{ .nr = .bpf, .errno = 1 },
-    .{ .nr = .userfaultfd, .errno = 1 },
+const wanted = [_]struct { []const u8, u32 }{
+    .{ "syslog", 1 },
+    .{ "uselib", 1 },
+    .{ "acct", 1 },
+    .{ "modify_ldt", 1 },
+    .{ "quotactl", 1 },
+    .{ "add_key", 1 },
+    .{ "keyctl", 1 },
+    .{ "request_key", 1 },
+    .{ "move_pages", 1 },
+    .{ "mbind", 1 },
+    .{ "get_mempolicy", 1 },
+    .{ "set_mempolicy", 1 },
+    .{ "migrate_pages", 1 },
+    .{ "unshare", 1 },
+    .{ "setns", 1 },
+    .{ "mount", 1 },
+    .{ "umount2", 1 },
+    .{ "pivot_root", 1 },
+    .{ "chroot", 1 },
+    .{ "clone3", 38 },
+    .{ "open_tree", 38 },
+    .{ "move_mount", 38 },
+    .{ "fsopen", 38 },
+    .{ "fsconfig", 38 },
+    .{ "fsmount", 38 },
+    .{ "fspick", 38 },
+    .{ "mount_setattr", 38 },
+    .{ "perf_event_open", 1 },
+    .{ "personality", 1 },
+    .{ "ptrace", 1 },
+    .{ "kexec_load", 1 },
+    .{ "kexec_file_load", 1 },
+    .{ "bpf", 1 },
+    .{ "userfaultfd", 1 },
+};
+
+const blocked = blk: {
+    var list: [wanted.len]Block = undefined;
+    var n: usize = 0;
+    for (wanted) |w| {
+        if (@hasField(linux.SYS, w[0])) {
+            list[n] = .{ .nr = @field(linux.SYS, w[0]), .errno = w[1] };
+            n += 1;
+        }
+    }
+    const out = list[0..n].*;
+    break :blk out;
 };
 
 const CLONE_NEWUSER: u32 = 0x10000000;
@@ -149,7 +188,7 @@ pub fn filter() [blocked.len * 2 + 22]Insn {
     var i: usize = 0;
     f[i] = stmt(LD_W_ABS, OFF_ARCH);
     i += 1;
-    f[i] = jump(JEQ_K, AUDIT_ARCH_X86_64, 1, 0);
+    f[i] = jump(JEQ_K, AUDIT_ARCH, 1, 0);
     i += 1;
     f[i] = stmt(RET_K, RET_KILL);
     i += 1;

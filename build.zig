@@ -81,7 +81,7 @@ fn pinOf(comptime text: []const u8, comptime key: []const u8) []const u8 {
     @compileError("upstream/wpewebkit has no " ++ key);
 }
 
-fn platformModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, src: []const u8, out: []const u8) *std.Build.Module {
+fn platformModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, src: []const u8, out: []const u8, ocdm: *std.Build.Step.Compile) *std.Build.Module {
     const mod = b.createModule(.{
         .root_source_file = b.path(root),
         .target = target,
@@ -95,13 +95,13 @@ fn platformModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTar
     mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
     mod.addRPath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "lib" }) });
     mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no });
-    mod.linkSystemLibrary("ocdm", .{ .use_pkg_config = .no, .needed = true });
+    mod.linkLibrary(ocdm);
     for ([_][]const u8{ "glib-2.0", "gobject-2.0", "gio-2.0", "epoxy", "gbm", "libdrm" }) |s| mod.linkSystemLibrary(s, .{});
     return mod;
 }
 
-fn webviewModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, src: []const u8, out: []const u8) *std.Build.Module {
-    const mod = platformModule(b, root, target, optimize, src, out);
+fn webviewModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, src: []const u8, out: []const u8, ocdm: *std.Build.Step.Compile) *std.Build.Module {
+    const mod = platformModule(b, root, target, optimize, src, out, ocdm);
     mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ out, "stage", "usr", "local", "include", "wpe-webkit-2.0" }) });
     mod.addIncludePath(b.path("webview"));
     mod.linkSystemLibrary("gtk4", .{});
@@ -131,6 +131,24 @@ fn proxy3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     mod.linkSystemLibrary("WPEWebKit-2.0", .{ .use_pkg_config = .no, .needed = true });
     for ([_][]const u8{ "glib-2.0", "gobject-2.0", "gio-2.0", "gtk+-3.0", "cairo-gobject", "libsoup-3.0", "epoxy" }) |s| mod.linkSystemLibrary(s, .{});
     return mod;
+}
+
+fn placeFile(b: *std.Build, file: std.Build.LazyPath, dest: []const u8) *std.Build.Step {
+    const copy = b.addSystemCommand(&.{ "sh", "-ec", "mkdir -p \"$(dirname \"$2\")\" && cp \"$1\" \"$2\"", "place" });
+    copy.addFileArg(file);
+    copy.addArg(dest);
+    return &copy.step;
+}
+
+fn netModule(b: *std.Build, target: std.Build.ResolvedTarget, quic: []const u8, archives: ?[]const u8) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("net/pool.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true });
+    m.addIncludePath(b.path("net"));
+    m.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ quic, "include" }) });
+    m.linkSystemLibrary("glib-2.0", .{});
+    m.linkSystemLibrary("gio-2.0", .{});
+    m.linkSystemLibrary("gnutls", .{});
+    if (archives) |dir| for (net_archives) |a| m.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ dir, a }) });
+    return m;
 }
 
 const Cross = struct {
@@ -288,13 +306,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true }),
     });
     hooks.root_module.addImport("webgpu", webgpu_mod);
-    const net_mod = b.createModule(.{ .root_source_file = b.path("net/pool.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true });
-    net_mod.addIncludePath(b.path("net"));
-    net_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ quic, "include" }) });
-    net_mod.linkSystemLibrary("glib-2.0", .{});
-    net_mod.linkSystemLibrary("gio-2.0", .{});
-    net_mod.linkSystemLibrary("gnutls", .{});
-    for (net_archives) |a| net_mod.addObjectFile(.{ .cwd_relative = b.pathJoin(&.{ quic_lib, a }) });
+    const net_mod = netModule(b, target, quic, null);
+    const net_test_mod = netModule(b, target, quic, quic_lib);
     hooks.root_module.addImport("net", net_mod);
     hooks.step.dependOn(&dawn_compile.step);
     hooks.step.dependOn(&quic_build.step);
@@ -316,8 +329,13 @@ pub fn build(b: *std.Build) void {
     cross.cmake(b, configure);
     if (b.option([]const []const u8, "engine-cmake", "extra CMake definition for the engine, repeatable")) |extra| configure.addArgs(extra);
     configure.addArg(b.fmt("-DTHUNDER_INCLUDE_DIR={s}", .{b.pathFromRoot("ocdm")}));
-    configure.addPrefixedFileArg("-DTHUNDER_LIBRARY=", ocdm.getEmittedBin());
-    configure.addPrefixedFileArg("-DFOTONE_HOOKS=", hooks.getEmittedBin());
+    const ocdm_lib = b.pathJoin(&.{ out, "lib", "libocdm.so.1" });
+    configure.step.dependOn(placeFile(b, ocdm.getEmittedBin(), ocdm_lib));
+    configure.addArg(b.fmt("-DTHUNDER_LIBRARY={s}", .{ocdm_lib}));
+    if (cross.sysroot != null) configure.addArg(b.fmt("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,{s}", .{b.pathJoin(&.{ out, "lib" })}));
+    const hooks_lib = b.pathJoin(&.{ out, "libfotone-hooks.a" });
+    configure.step.dependOn(placeFile(b, hooks.getEmittedBin(), hooks_lib));
+    configure.addArg(b.fmt("-DFOTONE_HOOKS={s}", .{hooks_lib}));
     configure.addArg(b.fmt("-DFOTONE_NET_LIBS={s}", .{net_libs}));
     configure.step.dependOn(&fetch.step);
     configure.addArgs(&.{
@@ -357,13 +375,13 @@ pub fn build(b: *std.Build) void {
         .name = "fotone",
         .linkage = .dynamic,
         .version = .{ .major = 0, .minor = 1, .patch = 0 },
-        .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out),
+        .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out, ocdm),
         .use_llvm = true,
     });
     platform.installHeader(b.path("platform/fotone.h"), "fotone/fotone.h");
     b.installArtifact(platform);
 
-    const webview_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out);
+    const webview_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out, ocdm);
     webview_mod.linkLibrary(platform);
     const webview = b.addLibrary(.{
         .name = "sitwebview",
@@ -376,7 +394,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(webview);
     b.installFile("webview/site-exceptions.json", "share/fotone/site-exceptions.json");
 
-    const viewer_mod = webviewModule(b, "viewer/main.zig", target, optimize, src, out);
+    const viewer_mod = webviewModule(b, "viewer/main.zig", target, optimize, src, out, ocdm);
     viewer_mod.addIncludePath(b.path("viewer"));
     viewer_mod.linkLibrary(webview);
     viewer_mod.linkLibrary(platform);
@@ -406,7 +424,7 @@ pub fn build(b: *std.Build) void {
     engine_mod.addIncludePath(b.path("engine"));
     engine_mod.linkSystemLibrary("gobject-2.0", .{});
 
-    const proxy_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out);
+    const proxy_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out, ocdm);
     proxy_mod.addIncludePath(b.path("proxy"));
     proxy_mod.addImport("engine", engine_mod);
     proxy_mod.addOptions("options", flavor(b, false));
@@ -482,11 +500,11 @@ pub fn build(b: *std.Build) void {
     bump.setCwd(b.path("."));
     b.step("bump", "move the upstream pin to the newest stable WPE WebKit release").dependOn(&bump.step);
 
-    const t = b.addTest(.{ .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out), .use_llvm = true });
-    const wt_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out);
+    const t = b.addTest(.{ .root_module = platformModule(b, "platform/fotone.zig", target, optimize, src, out, ocdm), .use_llvm = true });
+    const wt_mod = webviewModule(b, "webview/sitwebview.zig", target, optimize, src, out, ocdm);
     wt_mod.linkLibrary(platform);
     const wt = b.addTest(.{ .root_module = wt_mod, .use_llvm = true });
-    const pt_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out);
+    const pt_mod = webviewModule(b, "proxy/proxy.zig", target, optimize, src, out, ocdm);
     pt_mod.addIncludePath(b.path("proxy"));
     pt_mod.addImport("engine", engine_mod);
     pt_mod.linkLibrary(webview);
@@ -498,14 +516,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(t).step);
     test_step.dependOn(&b.addRunArtifact(wt).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sandbox_mod })).step);
-    const hooks_test = b.addTest(.{ .root_module = hooks.root_module });
+    const hooks_test_mod = b.createModule(.{ .root_source_file = b.path("hooks/hooks.zig"), .target = target, .optimize = .ReleaseFast, .pic = true, .link_libc = true });
+    hooks_test_mod.addImport("webgpu", webgpu_mod);
+    hooks_test_mod.addImport("net", net_test_mod);
+    const hooks_test = b.addTest(.{ .root_module = hooks_test_mod });
     hooks_test.step.dependOn(&quic_build.step);
     test_step.dependOn(&b.addRunArtifact(hooks_test).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = webgpu_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ocdm_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bump_mod, .use_llvm = true })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = perf_mod })).step);
-    for ([_]*std.Build.Module{ h3_mod, net_mod }) |m| {
+    for ([_]*std.Build.Module{ h3_mod, net_test_mod }) |m| {
         const unit = b.addTest(.{ .root_module = m });
         unit.step.dependOn(&quic_build.step);
         test_step.dependOn(&b.addRunArtifact(unit).step);
