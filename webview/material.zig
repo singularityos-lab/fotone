@@ -34,7 +34,7 @@ fn frame() ?Frame {
     if (looked) return frame_fn;
     looked = true;
     const h = std.c.dlopen(LIBRARY, .{ .LAZY = true }) orelse return null;
-    frame_fn = @ptrCast(std.c.dlsym(h, "singularity_surface_effect_set_frame") orelse return null);
+    frame_fn = @ptrCast(@alignCast(std.c.dlsym(h, "singularity_surface_effect_set_frame") orelse return null));
     return frame_fn;
 }
 

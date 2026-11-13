@@ -175,7 +175,7 @@ fn later(comptime f: anytype, args: anytype) void {
 }
 
 fn vcall(cdm: *Cdm, comptime idx: usize, comptime F: type, args: anytype) Ret(@as(F, undefined)) {
-    const f: *const F = @ptrCast(cdm.vtbl[idx]);
+    const f: *const F = @ptrCast(@alignCast(cdm.vtbl[idx]));
     return @call(.auto, f, .{cdm} ++ args);
 }
 
@@ -524,7 +524,7 @@ fn writeDone(f: *File, status: u32) void {
 }
 
 fn vcallClient(cl: *Client, comptime idx: usize, comptime F: type, args: anytype) void {
-    const f: *const F = @ptrCast(cl.vtbl[idx]);
+    const f: *const F = @ptrCast(@alignCast(cl.vtbl[idx]));
     @call(.auto, f, .{cl} ++ args);
 }
 
@@ -591,8 +591,8 @@ fn ensure() bool {
         var buf: [4096]u8 = undefined;
         const p = libPath(&buf) orelse return false;
         const lib = std.c.dlopen(p, .{ .NOW = true }) orelse return false;
-        const init: *const fn () callconv(.c) void = @ptrCast(std.c.dlsym(lib, "InitializeCdmModule_4") orelse return false);
-        const create: *const fn (c_int, [*]const u8, u32, *const anyopaque, ?*anyopaque) callconv(.c) ?*Cdm = @ptrCast(std.c.dlsym(lib, "CreateCdmInstance") orelse return false);
+        const init: *const fn () callconv(.c) void = @ptrCast(@alignCast(std.c.dlsym(lib, "InitializeCdmModule_4") orelse return false));
+        const create: *const fn (c_int, [*]const u8, u32, *const anyopaque, ?*anyopaque) callconv(.c) ?*Cdm = @ptrCast(@alignCast(std.c.dlsym(lib, "CreateCdmInstance") orelse return false));
         init();
         instance = create(INTERFACE, KEY_SYSTEM, KEY_SYSTEM.len, @ptrCast(&getHost), null) orelse return false;
     }

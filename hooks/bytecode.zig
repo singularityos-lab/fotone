@@ -55,8 +55,8 @@ pub export fn fotone_bytecode_cache_path(url: [*]const u8, url_len: usize, hash:
 
 fn open() ?Compute {
     const lib = std.c.dlopen("libsintycompute.so.0", .{ .LAZY = true }) orelse return null;
-    const open_fn: *const fn () callconv(.c) c_int = @ptrCast(std.c.dlsym(lib, "sinty_compute_open") orelse return null);
-    const report: *const fn (c_int, *const Report) callconv(.c) c_int = @ptrCast(std.c.dlsym(lib, "sinty_compute_report") orelse return null);
+    const open_fn: *const fn () callconv(.c) c_int = @ptrCast(@alignCast(std.c.dlsym(lib, "sinty_compute_open") orelse return null));
+    const report: *const fn (c_int, *const Report) callconv(.c) c_int = @ptrCast(@alignCast(std.c.dlsym(lib, "sinty_compute_report") orelse return null));
     const fd = open_fn();
     if (fd < 0) return null;
     return .{ .fd = fd, .report = report };

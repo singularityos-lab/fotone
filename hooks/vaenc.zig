@@ -206,7 +206,7 @@ var api: ?Api = null;
 var loaded = false;
 
 pub fn sym(comptime T: type, lib: *anyopaque, name: [:0]const u8) ?T {
-    return @ptrCast(std.c.dlsym(lib, name) orelse return null);
+    return @ptrCast(@alignCast(std.c.dlsym(lib, name) orelse return null));
 }
 
 pub fn load() ?Api {

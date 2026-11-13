@@ -273,6 +273,7 @@ pub fn build(b: *std.Build) void {
         \\tar -C "$(dirname "$1")" -xf "$t"
         \\for p in $(awk '{print $2}' "$4"); do patch -d "$1" -p1 -N < "$(dirname "$4")/$p"; done
     , "fetch", src, comptime pinValue("url"), comptime pinValue("sha256"), b.pathFromRoot("patches/series") });
+    lower.step.dependOn(&fetch.step);
 
     const upstream_step = b.step("upstream", "collect the patches meant for WebKit upstream");
     const collect = b.addSystemCommand(&.{ "sh", "-ec",
