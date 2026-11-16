@@ -315,6 +315,7 @@ pub const Conn = struct {
         if (r.finished) return;
         r.finished = true;
         self.active -= 1;
+        if (self.h3) |h3| _ = c.nghttp3_conn_set_stream_user_data(h3, r.stream, null);
         r.sink.done(r.sink.ctx, ok);
     }
 
