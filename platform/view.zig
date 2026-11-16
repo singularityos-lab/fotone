@@ -145,15 +145,19 @@ fn present(v: *View) void {
         c.g_object_unref(old);
     }
     v.shown = b;
-    c.wpe_view_buffer_rendered(&v.parent, b);
 }
 
 fn renderBuffer(view: [*c]c.WPEView, buffer: [*c]c.WPEBuffer, rects: [*c]const c.WPERectangle, n: c.guint, _: [*c][*c]c.GError) callconv(.c) c.gboolean {
     const v = of(view);
     v.n_damage = if (n > max_damage or rects == null) 0 else n;
     if (v.n_damage > 0) @memcpy(v.damage[0..v.n_damage], rects[0..v.n_damage]);
-    g.unrefPtr(&v.pending);
+    if (v.pending) |skipped| {
+        v.n_damage = 0;
+        c.wpe_view_buffer_released(&v.parent, skipped);
+        c.g_object_unref(skipped);
+    }
     v.pending = @ptrCast(@alignCast(c.g_object_ref(buffer)));
+    c.wpe_view_buffer_rendered(view, buffer);
     if (v.func) |f| f(view, buffer, v.data) else present(v);
     return 1;
 }

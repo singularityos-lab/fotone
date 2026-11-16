@@ -3,6 +3,7 @@ const c = @import("c.zig").c;
 const g = @import("gobject.zig");
 const view = @import("view.zig");
 const toplevel = @import("toplevel.zig");
+const screen = @import("screen.zig");
 
 pub const Display = extern struct {
     parent: c.WPEDisplay,
@@ -12,6 +13,8 @@ pub const Display = extern struct {
     fd: c_int,
     formats: [*c]c.GArray,
     keymap: ?*c.WPEKeymap,
+    screen: ?*screen.Screen,
+    card: c_int,
 };
 
 const Class = extern struct {
@@ -41,15 +44,20 @@ fn of(p: anytype) *Display {
 fn instanceInit(inst: [*c]c.GTypeInstance, _: c.gpointer) callconv(.c) void {
     const d = of(inst);
     d.fd = -1;
+    d.card = -1;
     d.formats = c.g_array_new(0, 0, @sizeOf(Format));
+    d.screen = screen.new(1);
 }
 
 fn finalize(o: [*c]c.GObject) callconv(.c) void {
     const d = of(o);
     if (d.gbm) |m| c.gbm_device_destroy(m);
     if (d.fd >= 0) _ = c.close(d.fd);
+    if (d.screen) |sc| screen.setVBlank(sc, -1, -1);
+    if (d.card >= 0) _ = c.close(d.card);
     if (d.drm) |m| c.wpe_drm_device_unref(m);
     g.unrefPtr(&d.keymap);
+    g.unrefPtr(&d.screen);
     c.g_free(d.node);
     _ = c.g_array_free(d.formats, 1);
     parent_class.?.finalize.?(o);
@@ -132,6 +140,19 @@ fn getPreferredFormats(display: [*c]c.WPEDisplay) callconv(.c) ?*c.WPEBufferForm
     return c.wpe_buffer_formats_builder_end(b);
 }
 
+fn nScreens(_: [*c]c.WPEDisplay) callconv(.c) c.guint {
+    return 1;
+}
+
+fn getScreen(display: [*c]c.WPEDisplay, index: c.guint) callconv(.c) [*c]c.WPEScreen {
+    const s = of(display).screen orelse return null;
+    return if (index == 0) &s.parent else null;
+}
+
+pub fn screenOf(display: ?*c.WPEDisplay) ?*screen.Screen {
+    return of(display orelse return null).screen;
+}
+
 fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     parent_class = @ptrCast(@alignCast(c.g_type_class_peek_parent(klass)));
     g.objectClass(klass).finalize = finalize;
@@ -143,6 +164,8 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     dc.get_drm_device = getDrmDevice;
     dc.get_keymap = getKeymap;
     dc.get_preferred_buffer_formats = getPreferredFormats;
+    dc.get_n_screens = nScreens;
+    dc.get_screen = getScreen;
 }
 
 pub export fn fotone_display_get_type() c.GType {
@@ -160,6 +183,53 @@ pub export fn fotone_display_add_format(display: [*c]c.WPEDisplay, fourcc: u32, 
     _ = c.g_array_append_vals(of(display).formats, &f, 1);
 }
 
+pub export fn fotone_display_set_screen(display: [*c]c.WPEDisplay, width: c_int, height: c_int, scale: f64) void {
+    const s = of(display).screen orelse return;
+    const ws: *c.WPEScreen = &s.parent;
+    if (width > 0 and height > 0) c.wpe_screen_set_size(ws, width, height);
+    if (scale > 0) c.wpe_screen_set_scale(ws, scale);
+}
+
+fn crtcOf(fd: c_int, connector: []const u8) c_int {
+    const res = c.drmModeGetResources(fd) orelse return -1;
+    defer c.drmModeFreeResources(res);
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(res.*.count_connectors))) : (i += 1) {
+        const conn = c.drmModeGetConnectorCurrent(fd, res.*.connectors[i]) orelse continue;
+        defer c.drmModeFreeConnector(conn);
+        const kind = c.drmModeGetConnectorTypeName(conn.*.connector_type) orelse continue;
+        var buf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&buf, "{s}-{d}", .{ std.mem.span(kind), conn.*.connector_type_id }) catch continue;
+        if (!std.mem.eql(u8, name, connector) or conn.*.encoder_id == 0) continue;
+        const enc = c.drmModeGetEncoder(fd, conn.*.encoder_id) orelse return -1;
+        defer c.drmModeFreeEncoder(enc);
+        var k: usize = 0;
+        while (k < @as(usize, @intCast(res.*.count_crtcs))) : (k += 1) {
+            if (res.*.crtcs[k] == enc.*.crtc_id) return @intCast(k);
+        }
+        return -1;
+    }
+    return -1;
+}
+
+fn primaryFd(d: *Display) c_int {
+    if (d.card >= 0) return d.card;
+    const m = d.drm orelse return -1;
+    const node = c.wpe_drm_device_get_primary_node(m) orelse return -1;
+    d.card = c.open(node, c.O_RDWR | c.O_CLOEXEC);
+    return d.card;
+}
+
+pub export fn fotone_display_set_output(display: [*c]c.WPEDisplay, connector: [*c]const u8, refresh: c_int) void {
+    const d = of(display);
+    const s = d.screen orelse return;
+    screen.setRate(s, refresh);
+    if (connector == null) return;
+    const fd = primaryFd(d);
+    if (fd < 0) return;
+    screen.setVBlank(s, fd, crtcOf(fd, std.mem.span(connector)));
+}
+
 pub export fn fotone_display_get_render_node(display: [*c]c.WPEDisplay) [*c]const u8 {
     return of(display).node;
 }
@@ -170,4 +240,16 @@ test "display keeps the formats the host offers" {
     fotone_display_add_format(d, 0x34325258, 0);
     fotone_display_add_format(d, 0x34325241, 0x00ffffffffffffff);
     try std.testing.expectEqual(@as(c.guint, 2), of(d).formats.*.len);
+}
+
+test "display offers one screen at the monitor rate" {
+    const d = fotone_display_new(null);
+    defer c.g_object_unref(d);
+    try std.testing.expectEqual(@as(c.guint, 1), c.wpe_display_get_n_screens(d));
+    fotone_display_set_screen(d, 1920, 1200, 1.25);
+    fotone_display_set_output(d, null, 120000);
+    const s = c.wpe_display_get_screen(d, 0);
+    try std.testing.expectEqual(@as(c_int, 120000), c.wpe_screen_get_refresh_rate(s));
+    try std.testing.expectEqual(@as(c_int, 1920), c.wpe_screen_get_width(s));
+    try std.testing.expect(c.wpe_screen_get_sync_observer(s) != null);
 }

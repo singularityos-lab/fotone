@@ -19,6 +19,13 @@ void         fotone_display_add_format      (WPEDisplay     *display,
                                              guint32         fourcc,
                                              guint64         modifier);
 const char  *fotone_display_get_render_node (WPEDisplay     *display);
+void         fotone_display_set_screen      (WPEDisplay     *display,
+                                             int             width,
+                                             int             height,
+                                             double          scale);
+void         fotone_display_set_output      (WPEDisplay     *display,
+                                             const char     *connector,
+                                             int             refresh_rate);
 
 void         fotone_view_set_frame_func     (WPEView        *view,
                                              FotoneFrameFunc func,

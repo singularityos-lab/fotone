@@ -15,3 +15,6 @@
 #include <epoxy/egl.h>
 #include <gbm.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <pthread.h>
+#include <time.h>

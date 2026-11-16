@@ -280,6 +280,7 @@ fn scaleChanged(_: ?*c.GObject, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c
     const w = of(data);
     const wd = widget(w);
     if (w.toplevel) |t| c.fotone_toplevel_configure(t, c.gtk_widget_get_width(wd), c.gtk_widget_get_height(wd), scaleOf(wd));
+    followMonitor(w);
 }
 
 fn stateChanged(_: ?*c.GObject, _: ?*c.GParamSpec, data: c.gpointer) callconv(.c) void {
@@ -481,6 +482,16 @@ fn oldestHidden(list: *c.GPtrArray) ?*WebView {
     return best;
 }
 
+fn followMonitor(w: *WebView) void {
+    const sf = w.surface orelse return;
+    const d = shared orelse return;
+    const m = c.gdk_display_get_monitor_at_surface(c.gdk_surface_get_display(sf), sf) orelse return;
+    var geo: c.GdkRectangle = undefined;
+    c.gdk_monitor_get_geometry(m, &geo);
+    c.fotone_display_set_screen(d, geo.width, geo.height, c.gdk_monitor_get_scale(m));
+    c.fotone_display_set_output(d, c.gdk_monitor_get_connector(m), c.gdk_monitor_get_refresh_rate(m));
+}
+
 fn track(w: *WebView) void {
     if (views == null) views = c.g_ptr_array_new();
     c.g_ptr_array_add(views, w);
@@ -496,6 +507,7 @@ fn map(wd: [*c]c.GtkWidget) callconv(.c) void {
     w.clock = c.gtk_widget_get_frame_clock(wd);
     if (w.clock) |k| w.paint = c.g_signal_connect_data(k, "after-paint", @ptrCast(&afterPaint), w, null, 0);
     if (c.gtk_widget_get_native(wd)) |n| w.surface = c.gtk_native_get_surface(n);
+    followMonitor(w);
     if (w.surface) |sf| w.rescale = c.g_signal_connect_data(sf, "notify::scale", @ptrCast(&scaleChanged), w, null, 0);
     if (w.surface) |sf| w.restate = c.g_signal_connect_data(sf, "notify::state", @ptrCast(&stateChanged), w, null, 0);
     if (w.view) |v| c.wpe_view_set_toplevel(v, w.toplevel);

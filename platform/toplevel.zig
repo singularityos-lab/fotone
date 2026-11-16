@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 const g = @import("gobject.zig");
+const display = @import("display.zig");
 
 pub const FullscreenFunc = ?*const fn (?*c.WPEToplevel, c.gboolean, c.gpointer) callconv(.c) c.gboolean;
 
@@ -39,6 +40,11 @@ fn setFullscreen(toplevel: [*c]c.WPEToplevel, on: c.gboolean) callconv(.c) c.gbo
     return f(toplevel, on, t.data);
 }
 
+fn getScreen(toplevel: [*c]c.WPEToplevel) callconv(.c) [*c]c.WPEScreen {
+    const s = display.screenOf(c.wpe_toplevel_get_display(toplevel)) orelse return null;
+    return &s.parent;
+}
+
 fn clearFunc(t: *Toplevel) void {
     if (t.destroy) |d| d(t.data);
     t.fullscreen = null;
@@ -59,6 +65,7 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     const tc: *c.WPEToplevelClass = @ptrCast(@alignCast(klass));
     tc.resize = resize;
     tc.set_fullscreen = setFullscreen;
+    tc.get_screen = getScreen;
 }
 
 const Size = struct { w: c_int, h: c_int };
