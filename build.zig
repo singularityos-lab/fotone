@@ -272,7 +272,7 @@ pub fn build(b: *std.Build) void {
 
     const lower = b.addRunArtifact(b.addExecutable(.{
         .name = "fotone-lower",
-        .root_module = b.createModule(.{ .root_source_file = b.path("webgpu/lower.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true }),
+        .root_module = b.createModule(.{ .root_source_file = b.path("webgpu/lower.zig"), .target = b.resolveTargetQuery(.{ .abi = .musl }), .optimize = .Debug, .link_libc = true }),
     }));
     const lowered = lower.addOutputFileArg("webkit_webgpu.h");
     lower.addFileArg(.{ .cwd_relative = b.pathJoin(&.{ src, "Source", "WebGPU", "WebGPU", "WebGPU.h" }) });
