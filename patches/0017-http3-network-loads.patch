@@ -31,7 +31,7 @@
  } // namespace WebKit
 --- a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
 +++ b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
-@@ -51,6 +51,171 @@
+@@ -51,6 +51,197 @@
  #include <wtf/glib/RunLoopSourcePriority.h>
  #include <wtf/text/MakeString.h>
  
@@ -55,16 +55,16 @@
 +    GByteArray* buffer;
 +    gboolean finished;
 +    GError* error;
-+    GTask* pending;
-+    void* pendingBuffer;
-+    gsize pendingCount;
 +} FotonePushStream;
 +
 +typedef struct {
 +    GInputStreamClass parent;
 +} FotonePushStreamClass;
 +
-+G_DEFINE_TYPE(FotonePushStream, fotone_push_stream, G_TYPE_INPUT_STREAM)
++static void fotonePushStreamPollableInit(GPollableInputStreamInterface*);
++
++G_DEFINE_TYPE_WITH_CODE(FotonePushStream, fotone_push_stream, G_TYPE_INPUT_STREAM,
++    G_IMPLEMENT_INTERFACE(G_TYPE_POLLABLE_INPUT_STREAM, fotonePushStreamPollableInit))
 +
 +static gssize fotonePushStreamTake(FotonePushStream* stream, void* buffer, gsize count)
 +{
@@ -74,77 +74,106 @@
 +    return length;
 +}
 +
++static gssize fotonePushStreamTakeOrFail(FotonePushStream* stream, void* buffer, gsize count, GError** error)
++{
++    if (stream->buffer->len)
++        return fotonePushStreamTake(stream, buffer, count);
++    if (!stream->error)
++        return 0;
++    g_set_error_literal(error, stream->error->domain, stream->error->code, stream->error->message);
++    return -1;
++}
++
 +static gssize fotonePushStreamRead(GInputStream* base, void* buffer, gsize count, GCancellable*, GError** error)
 +{
 +    auto* stream = reinterpret_cast<FotonePushStream*>(base);
 +    g_mutex_lock(&stream->mutex);
 +    while (!stream->buffer->len && !stream->finished)
 +        g_cond_wait(&stream->cond, &stream->mutex);
-+    gssize result = 0;
-+    if (stream->buffer->len)
-+        result = fotonePushStreamTake(stream, buffer, count);
-+    else if (stream->error) {
-+        g_set_error_literal(error, stream->error->domain, stream->error->code, stream->error->message);
-+        result = -1;
-+    }
++    gssize result = fotonePushStreamTakeOrFail(stream, buffer, count, error);
 +    g_mutex_unlock(&stream->mutex);
 +    return result;
 +}
 +
-+static void fotonePushStreamReadAsync(GInputStream* base, void* buffer, gsize count, int priority, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
++static gboolean fotonePushStreamIsReadable(GPollableInputStream* base)
 +{
 +    auto* stream = reinterpret_cast<FotonePushStream*>(base);
-+    GTask* task = g_task_new(base, cancellable, callback, userData);
-+    g_task_set_priority(task, priority);
 +    g_mutex_lock(&stream->mutex);
-+    if (!stream->buffer->len && !stream->finished) {
-+        stream->pending = task;
-+        stream->pendingBuffer = buffer;
-+        stream->pendingCount = count;
-+        g_mutex_unlock(&stream->mutex);
-+        return;
-+    }
-+    gssize result = 0;
-+    GError* error = nullptr;
-+    if (stream->buffer->len)
-+        result = fotonePushStreamTake(stream, buffer, count);
-+    else if (stream->error)
-+        error = g_error_copy(stream->error);
++    gboolean readable = stream->buffer->len || stream->finished;
 +    g_mutex_unlock(&stream->mutex);
-+    if (error)
-+        g_task_return_error(task, error);
-+    else
-+        g_task_return_int(task, result);
-+    g_object_unref(task);
++    return readable;
 +}
 +
-+static gssize fotonePushStreamReadFinish(GInputStream*, GAsyncResult* result, GError** error)
++static gssize fotonePushStreamReadNonblocking(GPollableInputStream* base, void* buffer, gsize count, GError** error)
 +{
-+    return g_task_propagate_int(G_TASK(result), error);
++    auto* stream = reinterpret_cast<FotonePushStream*>(base);
++    g_mutex_lock(&stream->mutex);
++    gssize result = -1;
++    if (stream->buffer->len || stream->finished)
++        result = fotonePushStreamTakeOrFail(stream, buffer, count, error);
++    else
++        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK, "No data available yet");
++    g_mutex_unlock(&stream->mutex);
++    return result;
++}
++
++typedef struct {
++    GSource parent;
++    GPollableInputStream* stream;
++} FotonePushSource;
++
++static gboolean fotonePushSourcePrepare(GSource* source, int* timeout)
++{
++    *timeout = -1;
++    return fotonePushStreamIsReadable(reinterpret_cast<FotonePushSource*>(source)->stream);
++}
++
++static gboolean fotonePushSourceCheck(GSource* source)
++{
++    return fotonePushStreamIsReadable(reinterpret_cast<FotonePushSource*>(source)->stream);
++}
++
++static gboolean fotonePushSourceDispatch(GSource* source, GSourceFunc callback, gpointer userData)
++{
++    if (!callback)
++        return G_SOURCE_REMOVE;
++    return reinterpret_cast<GPollableSourceFunc>(callback)(G_OBJECT(reinterpret_cast<FotonePushSource*>(source)->stream), userData);
++}
++
++static void fotonePushSourceFinalize(GSource* source)
++{
++    g_object_unref(reinterpret_cast<FotonePushSource*>(source)->stream);
++}
++
++static GSourceFuncs fotonePushSourceFuncs = { fotonePushSourcePrepare, fotonePushSourceCheck, fotonePushSourceDispatch, fotonePushSourceFinalize, nullptr, nullptr };
++
++static GSource* fotonePushStreamCreateSource(GPollableInputStream* base, GCancellable* cancellable)
++{
++    GSource* source = g_source_new(&fotonePushSourceFuncs, sizeof(FotonePushSource));
++    g_source_set_static_name(source, "FotonePushStream");
++    reinterpret_cast<FotonePushSource*>(source)->stream = G_POLLABLE_INPUT_STREAM(g_object_ref(base));
++    if (cancellable) {
++        GSource* cancelled = g_cancellable_source_new(cancellable);
++        g_source_set_dummy_callback(cancelled);
++        g_source_add_child_source(source, cancelled);
++        g_source_unref(cancelled);
++    }
++    return source;
++}
++
++static void fotonePushStreamPollableInit(GPollableInputStreamInterface* iface)
++{
++    iface->is_readable = fotonePushStreamIsReadable;
++    iface->create_source = fotonePushStreamCreateSource;
++    iface->read_nonblocking = fotonePushStreamReadNonblocking;
 +}
 +
 +static void fotonePushStreamWake(FotonePushStream* stream)
 +{
 +    g_mutex_lock(&stream->mutex);
-+    GTask* task = nullptr;
-+    gssize result = 0;
-+    GError* error = nullptr;
-+    if (stream->pending && (stream->buffer->len || stream->finished)) {
-+        task = std::exchange(stream->pending, nullptr);
-+        if (stream->buffer->len)
-+            result = fotonePushStreamTake(stream, stream->pendingBuffer, stream->pendingCount);
-+        else if (stream->error)
-+            error = g_error_copy(stream->error);
-+    }
 +    g_cond_broadcast(&stream->cond);
 +    g_mutex_unlock(&stream->mutex);
-+    if (!task)
-+        return;
-+    if (error)
-+        g_task_return_error(task, error);
-+    else
-+        g_task_return_int(task, result);
-+    g_object_unref(task);
++    g_main_context_wakeup(nullptr);
 +}
 +
 +static void fotonePushStreamPush(GInputStream* base, const uint8_t* data, size_t length)
@@ -194,16 +223,13 @@
 +static void fotone_push_stream_class_init(FotonePushStreamClass* klass)
 +{
 +    G_OBJECT_CLASS(klass)->finalize = fotonePushStreamFinalize;
-+    auto* streamClass = G_INPUT_STREAM_CLASS(klass);
-+    streamClass->read_fn = fotonePushStreamRead;
-+    streamClass->read_async = fotonePushStreamReadAsync;
-+    streamClass->read_finish = fotonePushStreamReadFinish;
++    G_INPUT_STREAM_CLASS(klass)->read_fn = fotonePushStreamRead;
 +}
 +
  namespace WebKit {
  using namespace WebCore;
  
-@@ -217,6 +382,7 @@
+@@ -217,6 +408,7 @@
      m_state = State::Completed;
  
      stopTimeout();
@@ -211,7 +237,7 @@
      m_pendingResult = nullptr;
      m_file = nullptr;
      m_inputStream = nullptr;
-@@ -254,19 +420,14 @@
+@@ -254,19 +446,14 @@
          if (m_shouldPreconnectOnly == PreconnectOnly::Yes) {
              soup_session_preconnect_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
                  reinterpret_cast<GAsyncReadyCallback>(preconnectCallback), protectedThis.leakRef());
@@ -239,7 +265,7 @@
          return;
      }
  
-@@ -297,12 +458,242 @@
+@@ -297,12 +484,242 @@
      }
  }
  
@@ -482,7 +508,7 @@
  
      g_cancellable_cancel(m_cancellable.get());
  
-@@ -1071,6 +1462,13 @@
+@@ -1071,6 +1488,13 @@
  
  void NetworkDataTaskSoup::didGetHeaders()
  {
