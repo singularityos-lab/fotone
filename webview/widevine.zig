@@ -64,6 +64,41 @@ fn windowOf(web: *c.WebKitWebView) ?*c.GtkWindow {
     return @ptrCast(@alignCast(root));
 }
 
+const LIBRARY = "libsingularity.so.0";
+const ConfirmNew = *const fn (?*c.GtkApplication, [*c]const u8, [*c]const u8, [*c]const u8, [*c]const u8, c_int) callconv(.c) ?*c.GtkWidget;
+const MessageNew = *const fn (?*c.GtkApplication, [*c]const u8, [*c]const u8, [*c]const u8, [*c]const u8) callconv(.c) ?*c.GtkWidget;
+
+const FocusPrimary = *const fn (?*c.GtkWidget) callconv(.c) void;
+
+const Kit = struct { confirm: ConfirmNew, message: MessageNew, focus: FocusPrimary };
+
+var kit_fns: ?Kit = null;
+var kit_looked = false;
+
+fn kit() ?Kit {
+    if (kit_looked) return kit_fns;
+    kit_looked = true;
+    const h = std.c.dlopen(LIBRARY, .{ .LAZY = true }) orelse return null;
+    const confirm = std.c.dlsym(h, "singularity_widgets_confirm_dialog_new") orelse return null;
+    const message = std.c.dlsym(h, "singularity_widgets_confirm_dialog_new_message") orelse return null;
+    const focus = std.c.dlsym(h, "singularity_widgets_confirm_dialog_focus_primary") orelse return null;
+    kit_fns = .{ .confirm = @ptrCast(@alignCast(confirm)), .message = @ptrCast(@alignCast(message)), .focus = @ptrCast(@alignCast(focus)) };
+    return kit_fns;
+}
+
+fn appOf(parent: ?*c.GtkWindow) ?*c.GtkApplication {
+    const p = parent orelse return null;
+    if (c.gtk_widget_has_css_class(@ptrCast(@alignCast(p)), "singularity") == 0) return null;
+    return c.gtk_window_get_application(p);
+}
+
+fn present(dialog: *c.GtkWidget, parent: ?*c.GtkWindow) void {
+    const w: *c.GtkWindow = @ptrCast(@alignCast(dialog));
+    c.gtk_window_set_transient_for(w, parent);
+    c.gtk_window_set_modal(w, 1);
+    c.gtk_window_present(w);
+}
+
 fn requested(_: ?*c.WebKitUserContentManager, value: ?*c.JSCValue, data: c.gpointer) callconv(.c) void {
     if (declined or busy or installed()) return;
     const web: *c.WebKitWebView = @ptrCast(@alignCast(data));
@@ -71,27 +106,46 @@ fn requested(_: ?*c.WebKitUserContentManager, value: ?*c.JSCValue, data: c.gpoin
     defer c.g_free(host);
     const message = c.g_strdup_printf(c.g_dgettext("fotone", "%s wants to play protected content"), host);
     defer c.g_free(message);
+    const detail = c.g_dgettext("fotone", "Fotone can download the Widevine module from Google to play it. The module is closed source and is covered by Google's terms.");
+    const parent = windowOf(web);
+    busy = true;
+    if (kit()) |k| {
+        if (appOf(parent)) |app| {
+            if (k.confirm(app, message, null, detail, c.g_dgettext("fotone", "Download"), 1)) |dialog| {
+                _ = c.g_signal_connect_data(dialog, "response", @ptrCast(&answered), c.g_object_ref(web), null, 0);
+                present(dialog, parent);
+                k.focus(dialog);
+                return;
+            }
+        }
+    }
     const d = c.gtk_alert_dialog_new("%s", message);
     defer c.g_object_unref(d);
-    c.gtk_alert_dialog_set_detail(d, c.g_dgettext("fotone", "Fotone can download the Widevine module from Google to play it. The module is closed source and is covered by Google's terms."));
+    c.gtk_alert_dialog_set_detail(d, detail);
     const labels = [_:null]?[*:0]const u8{ c.g_dgettext("fotone", "_Not Now"), c.g_dgettext("fotone", "_Download") };
     c.gtk_alert_dialog_set_buttons(d, @ptrCast(&labels));
     c.gtk_alert_dialog_set_cancel_button(d, 0);
     c.gtk_alert_dialog_set_default_button(d, 1);
-    busy = true;
-    c.gtk_alert_dialog_choose(d, windowOf(web), null, chosen, c.g_object_ref(web));
+    c.gtk_alert_dialog_choose(d, parent, null, chosen, c.g_object_ref(web));
+}
+
+fn answered(_: ?*c.GtkWidget, response: c_int, data: c.gpointer) callconv(.c) void {
+    decide(@ptrCast(@alignCast(data)), response == 0);
 }
 
 fn chosen(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv(.c) void {
-    const web: *c.WebKitWebView = @ptrCast(@alignCast(data));
-    if (c.gtk_alert_dialog_choose_finish(@ptrCast(@alignCast(src)), res, null) != 1) {
+    decide(@ptrCast(@alignCast(data)), c.gtk_alert_dialog_choose_finish(@ptrCast(@alignCast(src)), res, null) == 1);
+}
+
+fn decide(web: *c.WebKitWebView, download: bool) void {
+    if (!download) {
         declined = true;
         busy = false;
         return c.g_object_unref(web);
     }
     const job: *Job = @ptrCast(@alignCast(c.g_malloc0(@sizeOf(Job))));
     job.* = .{ .web = web, .session = c.soup_session_new().? };
-    const msg = c.soup_message_new("POST", UPDATE_URL) orelse return finish(job, "bad update address");
+    const msg = c.soup_message_new("POST", UPDATE_URL) orelse return finish(job, "Bad update address.");
     defer c.g_object_unref(msg);
     const body = c.g_bytes_new_static(REQUEST.ptr, REQUEST.len);
     defer c.g_bytes_unref(body);
@@ -154,9 +208,9 @@ fn bytesOf(b: *c.GBytes) []const u8 {
 
 fn checked(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv(.c) void {
     const job: *Job = @ptrCast(@alignCast(data));
-    const bytes = c.soup_session_send_and_read_finish(@ptrCast(@alignCast(src)), res, null) orelse return finish(job, "the update service did not answer");
+    const bytes = c.soup_session_send_and_read_finish(@ptrCast(@alignCast(src)), res, null) orelse return finish(job, "The update service did not answer.");
     defer c.g_bytes_unref(bytes);
-    const offer = parseOffer(bytesOf(bytes)) catch return finish(job, "the update service offered no module");
+    const offer = parseOffer(bytesOf(bytes)) catch return finish(job, "The update service offered no module.");
     job.sha = offer.sha;
     job.size = offer.size;
     const v = versionOf(offer.url[0..offer.url_len]);
@@ -165,7 +219,7 @@ fn checked(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv
     var url: [1025]u8 = undefined;
     @memcpy(url[0..offer.url_len], offer.url[0..offer.url_len]);
     url[offer.url_len] = 0;
-    const msg = c.soup_message_new("GET", @ptrCast(&url)) orelse return finish(job, "bad download address");
+    const msg = c.soup_message_new("GET", @ptrCast(&url)) orelse return finish(job, "Bad download address.");
     defer c.g_object_unref(msg);
     c.soup_session_send_and_read_async(job.session, msg, c.G_PRIORITY_DEFAULT, null, downloaded, job);
 }
@@ -266,17 +320,17 @@ fn versionOf(url: []const u8) []const u8 {
 
 fn downloaded(src: [*c]c.GObject, res: ?*c.GAsyncResult, data: c.gpointer) callconv(.c) void {
     const job: *Job = @ptrCast(@alignCast(data));
-    const bytes = c.soup_session_send_and_read_finish(@ptrCast(@alignCast(src)), res, null) orelse return finish(job, "the download failed");
+    const bytes = c.soup_session_send_and_read_finish(@ptrCast(@alignCast(src)), res, null) orelse return finish(job, "The download failed.");
     defer c.g_bytes_unref(bytes);
     const crx = bytesOf(bytes);
-    if (crx.len != job.size or crx.len > MAX_CRX) return finish(job, "the download has the wrong size");
+    if (crx.len != job.size or crx.len > MAX_CRX) return finish(job, "The download has the wrong size.");
     var sum: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(crx, &sum, .{});
-    if (!std.mem.eql(u8, &sum, &job.sha)) return finish(job, "the download does not match its checksum");
-    const zip = crxZip(crx) catch return finish(job, "the download is not a component package");
-    const module = unzip(zip, ENTRY) catch return finish(job, "the package has no Linux module");
+    if (!std.mem.eql(u8, &sum, &job.sha)) return finish(job, "The download does not match its checksum.");
+    const zip = crxZip(crx) catch return finish(job, "The download is not a component package.");
+    const module = unzip(zip, ENTRY) catch return finish(job, "The package has no Linux module.");
     defer std.heap.c_allocator.free(module);
-    if (!store(module, job.version[0..job.version_len])) return finish(job, "the module could not be saved");
+    if (!store(module, job.version[0..job.version_len])) return finish(job, "The module could not be saved.");
     finish(job, null);
 }
 
@@ -288,10 +342,17 @@ fn finish(job: *Job, err: ?[*:0]const u8) void {
         c.g_free(job);
     }
     if (err) |e| {
-        const d = c.gtk_alert_dialog_new("%s", c.g_dgettext("fotone", "Could not install Widevine"));
+        const title = c.g_dgettext("fotone", "Could not install Widevine");
+        const parent = windowOf(job.web);
+        if (kit()) |k| {
+            if (appOf(parent)) |app| {
+                if (k.message(app, title, null, c.g_dgettext("fotone", e), null)) |dialog| return present(dialog, parent);
+            }
+        }
+        const d = c.gtk_alert_dialog_new("%s", title);
         defer c.g_object_unref(d);
         c.gtk_alert_dialog_set_detail(d, c.g_dgettext("fotone", e));
-        c.gtk_alert_dialog_show(d, windowOf(job.web));
+        c.gtk_alert_dialog_show(d, parent);
         return;
     }
     c.webkit_web_view_terminate_web_process(job.web);
