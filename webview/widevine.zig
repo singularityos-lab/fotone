@@ -1,14 +1,27 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const c = @import("c.zig").c;
 
 const UPDATE_URL = "https://update.googleapis.com/service/update2/json";
 const APP_ID = "oimompecagnajdejgnnjijobebaeigek";
-const ENTRY = "_platform_specific/linux_x64/libwidevinecdm.so";
+const Platform = struct { os_arch: []const u8, arch: []const u8, dir: []const u8 };
+
+const platform: Platform = switch (builtin.cpu.arch) {
+    .x86_64 => .{ .os_arch = "x86_64", .arch = "x64", .dir = "linux_x64" },
+    .aarch64 => .{ .os_arch = "aarch64", .arch = "arm64", .dir = "linux_arm64" },
+    else => @compileError("Google ships no Widevine module for this architecture"),
+};
+
+const ENTRY = "_platform_specific/" ++ platform.dir ++ "/libwidevinecdm.so";
 const HANDLER = "fotoneWidevine";
 const MAX_CRX = 64 << 20;
 
 const REQUEST =
-    \\{"request":{"@os":"linux","@updater":"chrome","protocol":"3.1","acceptformat":"crx3","prodchannel":"stable","prodversion":"141.0.7390.0","updaterversion":"141.0.7390.0","os":{"platform":"Linux","arch":"x86_64","version":"6.0"},"arch":"x64","app":[{"appid":"
+    \\{"request":{"@os":"linux","@updater":"chrome","protocol":"3.1","acceptformat":"crx3","prodchannel":"stable","prodversion":"141.0.7390.0","updaterversion":"141.0.7390.0","os":{"platform":"Linux","arch":"
+++ platform.os_arch ++
+    \\","version":"6.0"},"arch":"
+++ platform.arch ++
+    \\","app":[{"appid":"
 ++ APP_ID ++
     \\","version":"0.0.0.0","updatecheck":{}}]}}
 ;
