@@ -239,7 +239,7 @@ pub fn main(init: std.process.Init) !u8 {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len < 4) usage();
-    _ = std.meta.stringToEnum(Kind, args[1]) orelse usage();
+    const kind = std.meta.stringToEnum(Kind, args[1]) orelse usage();
     var paths: std.ArrayList(Path) = .empty;
     for (system_ro) |p| try paths.append(gpa, .{ .path = p, .mode = .ro });
     for (system_rw) |p| try paths.append(gpa, .{ .path = p, .mode = .rw });
@@ -254,6 +254,7 @@ pub fn main(init: std.process.Init) !u8 {
         _ = linux.mkdir(dir, 0o700);
         try paths.append(gpa, .{ .path = dir, .mode = .rw });
     };
+    if (kind == .web) if (init.environ_map.get("XDG_RUNTIME_DIR")) |run| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ run, "pulse" }), .mode = .ro });
     if (init.environ_map.get("XDG_DATA_HOME")) |d| try paths.append(gpa, .{ .path = try std.fs.path.join(gpa, &.{ d, "fotone", "widevine" }), .mode = .rw });
     if (init.environ_map.get("LD_LIBRARY_PATH")) |ld| {
         var it = std.mem.tokenizeScalar(u8, ld, ':');
