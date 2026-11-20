@@ -15,11 +15,15 @@ pub const Display = extern struct {
     keymap: ?*c.WPEKeymap,
     screen: ?*screen.Screen,
     card: c_int,
+    im_func: InputMethodFunc,
+    im_data: c.gpointer,
 };
 
 const Class = extern struct {
     parent: c.WPEDisplayClass,
 };
+
+pub const InputMethodFunc = ?*const fn (?*c.WPEDisplay, ?*c.WPEView, c.gpointer) callconv(.c) ?*c.WPEInputMethodContext;
 
 const Format = extern struct {
     fourcc: u32,
@@ -153,6 +157,18 @@ pub fn screenOf(display: ?*c.WPEDisplay) ?*screen.Screen {
     return of(display orelse return null).screen;
 }
 
+fn createInputMethodContext(display: [*c]c.WPEDisplay, v: [*c]c.WPEView) callconv(.c) [*c]c.WPEInputMethodContext {
+    const d = of(display);
+    const f = d.im_func orelse return null;
+    return f(display, v, d.im_data);
+}
+
+pub export fn fotone_display_set_input_method_func(display: [*c]c.WPEDisplay, func: InputMethodFunc, data: c.gpointer) void {
+    const d = of(display);
+    d.im_func = func;
+    d.im_data = data;
+}
+
 fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     parent_class = @ptrCast(@alignCast(c.g_type_class_peek_parent(klass)));
     g.objectClass(klass).finalize = finalize;
@@ -160,6 +176,7 @@ fn classInit(klass: c.gpointer, _: c.gpointer) callconv(.c) void {
     dc.connect = connect;
     dc.create_view = createView;
     dc.create_toplevel = createToplevel;
+    dc.create_input_method_context = createInputMethodContext;
     dc.get_egl_display = getEglDisplay;
     dc.get_drm_device = getDrmDevice;
     dc.get_keymap = getKeymap;

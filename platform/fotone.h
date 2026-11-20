@@ -9,6 +9,7 @@ typedef void (*FotoneFrameFunc) (WPEView *view, WPEBuffer *buffer, gpointer user
 typedef void (*FotoneAccessibleFunc) (WPEView *view, const char *plug_id, gpointer user_data);
 typedef void (*FotoneCursorFunc) (WPEView *view, const char *name, GBytes *bytes, guint width, guint height, guint stride, guint hotspot_x, guint hotspot_y, gpointer user_data);
 typedef gboolean (*FotoneFullscreenFunc) (WPEToplevel *toplevel, gboolean fullscreen, gpointer user_data);
+typedef WPEInputMethodContext *(*FotoneInputMethodFunc) (WPEDisplay *display, WPEView *view, gpointer user_data);
 
 GType        fotone_display_get_type        (void);
 GType        fotone_view_get_type           (void);
@@ -26,6 +27,9 @@ void         fotone_display_set_screen      (WPEDisplay     *display,
 void         fotone_display_set_output      (WPEDisplay     *display,
                                              const char     *connector,
                                              int             refresh_rate);
+void         fotone_display_set_input_method_func (WPEDisplay           *display,
+                                                   FotoneInputMethodFunc func,
+                                                   gpointer              user_data);
 
 void         fotone_view_set_frame_func     (WPEView        *view,
                                              FotoneFrameFunc func,

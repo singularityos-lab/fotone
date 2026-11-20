@@ -19,6 +19,7 @@ const authn = @import("authn.zig");
 const pagetr = @import("translate.zig");
 const material = @import("material.zig");
 const extensions = @import("extensions.zig");
+const im = @import("im.zig");
 
 comptime {
     _ = authn;
@@ -95,6 +96,7 @@ fn display() ?*c.WPEDisplay {
             c.fotone_display_add_format(d, fourcc, modifier);
         }
     }
+    c.fotone_display_set_input_method_func(d, createInputMethod, null);
     devtools.prepare();
     privacy.identify();
     settings.warmScripts();
@@ -107,6 +109,14 @@ fn display() ?*c.WPEDisplay {
     accent.follow(d);
     shared = d;
     return d;
+}
+
+fn createInputMethod(_: ?*c.WPEDisplay, view: ?*c.WPEView, _: c.gpointer) callconv(.c) ?*c.WPEInputMethodContext {
+    const ctx = im.create(view);
+    if (view) |v| {
+        if (c.g_object_get_data(@ptrCast(v), "sit-widget")) |wd| im.bind(ctx, @ptrCast(@alignCast(wd)));
+    }
+    return ctx;
 }
 
 fn releaseBuffer(data: c.gpointer) callconv(.c) void {
@@ -683,6 +693,10 @@ fn gesture(w: *WebView, ev: ?*c.GdkEvent) bool {
 fn onEvent(_: ?*c.GtkEventControllerLegacy, ev: ?*c.GdkEvent, data: c.gpointer) callconv(.c) c.gboolean {
     const w = of(data);
     if (gesture(w, ev)) return 1;
+    switch (c.gdk_event_get_event_type(ev)) {
+        c.GDK_KEY_PRESS, c.GDK_KEY_RELEASE => if (im.filter(im.lookup(w.view), ev)) return 1,
+        else => {},
+    }
     const e = translate(w, ev) orelse return 0;
     defer c.wpe_event_unref(e);
     c.wpe_view_event(w.view, e);
@@ -725,6 +739,8 @@ fn attach(w: *WebView) void {
     w.toplevel = c.wpe_display_create_toplevel(d, 1);
     w.view = c.webkit_web_view_get_wpe_view(w.web);
     if (w.view) |v| {
+        c.g_object_set_data(@ptrCast(v), "sit-widget", widget(w));
+        im.bind(im.lookup(v), widget(w));
         c.fotone_view_set_frame_func(v, frame, w, null);
         c.fotone_view_set_accessible_func(v, a11y.plugged, w, null);
         c.fotone_view_set_cursor_func(v, cursorChanged, w);
