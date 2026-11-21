@@ -5,12 +5,15 @@ const FILE = "site-exceptions.json";
 const KEY = "fotone-site";
 const BASE_KEY = "fotone-site-base";
 
-const CHROME = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
-const FIREFOX = "Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0";
+const ARCH = @tagName(@import("builtin").cpu.arch);
+const CHROME = "Mozilla/5.0 (X11; Linux " ++ ARCH ++ ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+const CHROMEOS = "Mozilla/5.0 (X11; CrOS " ++ ARCH ++ " 16181.61.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+const FIREFOX = "Mozilla/5.0 (X11; Linux " ++ ARCH ++ "; rv:144.0) Gecko/20100101 Firefox/144.0";
 const SAFARI = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
 pub fn agentFor(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "chrome")) return CHROME;
+    if (std.mem.eql(u8, name, "chromeos")) return CHROMEOS;
     if (std.mem.eql(u8, name, "firefox")) return FIREFOX;
     if (std.mem.eql(u8, name, "safari")) return SAFARI;
     return name;
@@ -206,6 +209,12 @@ test "a site entry sets the agent and typed engine settings" {
     try std.testing.expectEqual(@as(c.guint, 18), c.webkit_settings_get_default_font_size(copy));
     try std.testing.expectEqualStrings(CHROME, std.mem.span(c.webkit_settings_get_user_agent(copy)));
     try std.testing.expect(autoplayOf(site) == null);
+}
+
+test "agent names follow the running architecture" {
+    try std.testing.expect(std.mem.indexOf(u8, agentFor("chrome"), "Linux " ++ ARCH ++ ")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, agentFor("chromeos"), "CrOS " ++ ARCH ++ " ") != null);
+    try std.testing.expectEqualStrings("Custom/1.0", agentFor("Custom/1.0"));
 }
 
 test "autoplay names map to website policies" {
