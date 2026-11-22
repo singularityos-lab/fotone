@@ -21,3 +21,4 @@ upstream 0020-mdns-local-names-without-avahi.patch
 fotone 0021-hardware-h264-for-calls.patch
 upstream 0022-io-priority-for-background-threads.patch
 fotone 0023-cache-writes-in-the-background.patch
+upstream 0025-form-submission-without-text-fields.patch

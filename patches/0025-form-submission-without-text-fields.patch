@@ -1,0 +1,11 @@
+--- a/Source/WebKit/UIProcess/API/glib/WebKitFormSubmissionRequest.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitFormSubmissionRequest.cpp
+@@ -153,7 +153,7 @@
+     if (fieldValues)
+         *fieldValues = request->priv->textFieldValues.get();
+ 
+-    return !!request->priv->textFieldNames->len;
++    return request->priv->textFieldNames && request->priv->textFieldNames->len;
+ }
+ 
+ /**
