@@ -1080,3 +1080,5 @@ test "modifiers map onto the WPE bits" {
     try std.testing.expectEqual(@as(c.WPEModifiers, c.WPE_MODIFIER_KEYBOARD_CONTROL | c.WPE_MODIFIER_POINTER_BUTTON1), modifiers(c.GDK_CONTROL_MASK | c.GDK_BUTTON1_MASK));
     try std.testing.expectEqual(@as(c.WPEModifiers, c.WPE_MODIFIER_KEYBOARD_META), modifiers(c.GDK_SUPER_MASK));
 }
+
+pub const std_options: @import("std").Options = .{ .signal_stack_size = null };

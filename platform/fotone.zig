@@ -16,3 +16,5 @@ test {
     _ = toplevel;
     _ = screen;
 }
+
+pub const std_options: @import("std").Options = .{ .signal_stack_size = null };

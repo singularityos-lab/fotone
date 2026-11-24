@@ -30,3 +30,5 @@ test {
     _ = legacy3;
     _ = extra;
 }
+
+pub const std_options: @import("std").Options = .{ .signal_stack_size = null };
